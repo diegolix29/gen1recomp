@@ -185,6 +185,8 @@ jobs:
           else
             scripts/build_android.sh
           fi
+        env:
+          PYTHON_CMD: python3
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
@@ -193,38 +195,39 @@ jobs:
           path: dist/android/debug/*.apk
           retention-days: 7
 
-  # Build iOS app (requires macOS)
-  build-ios:
-    name: iOS
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Determine version
-        id: ver
-        run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            version="${{ github.event.inputs.version }}"
-          else
-            version="$(git rev-parse --short HEAD)"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Fetch LÖVE iOS sources
-        run: |
-          set -euo pipefail
-          scripts/build_ios.sh --fetch
-
-      - name: Build iOS app (debug)
-        run: |
-          set -euo pipefail
-          scripts/build_ios.sh
-
-      - name: Upload iOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gen1recomp-ios
-          path: dist/ios/**/*.app
-          retention-days: 7
+  # Build iOS app (requires macOS) - DISABLED due to long compilation time
+  # Re-enable if needed for iOS testing
+  # build-ios:
+  #   name: iOS
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  # 
+  #     - name: Determine version
+  #       id: ver
+  #       run: |
+  #         if [ -n "${{ github.event.inputs.version }}" ]; then
+  #           version="${{ github.event.inputs.version }}"
+  #         else
+  #           version="$(git rev-parse --short HEAD)"
+  #         fi
+  #         echo "version=$version" >> "$GITHUB_OUTPUT"
+  # 
+  #     - name: Fetch LÖVE iOS sources
+  #       run: |
+  #         set -euo pipefail
+  #         scripts/build_ios.sh --fetch
+  # 
+  #     - name: Build iOS app (debug)
+  #       run: |
+  #         set -euo pipefail
+  #         scripts/build_ios.sh
+  # 
+  #     - name: Upload iOS artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gen1recomp-ios
+  #         path: dist/ios/**/*.app
+  #         retention-days: 7
