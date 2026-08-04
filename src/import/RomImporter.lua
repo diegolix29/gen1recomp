@@ -4606,198 +4606,40 @@ function RomImporter:_drawModsPanel(x, y, w, h, paged)
   local btnH = self.hintFont:getHeight() + 10 * s
   local btnGap = 8 * s
 
-  love.graphics.setFont(self.stateFont)
-  local nameH = self.stateFont:getHeight()
+-- NX / desktop / Android labels and inbox hints for the FlexLove view.
+function RomImporter:_modsImportButtonLabel()
+  if self.isNX then return Strings("Scan again") end
+  return Strings("Import mod .zip")
+end
 
-  -- pre-pass: per-card layout + total height, so scroll can clamp to content
-  local layout, total = {}, 0
-  for i, m in ipairs(mods) do
-    local chipText = modStatusChip(m.status)
-    local chipW = self.hintFont:getWidth(chipText) + 20 * s
-    local delW = self.hintFont:getWidth("Delete") + 24 * s
-    local verW = self.hintFont:getWidth("Versions") + 24 * s
-    local hasGh = m.github and m.github ~= ""
-    local info = hasGh and self:_modUpdateInfo(m.id) or nil
-    local updLabel = "Check for updates"
-    local updateKind = "neutral"
-    -- checkLine: always on the mod row for github mods so the check result
-    -- is visible without relying on the top-of-panel notice.
-    local checkLine = nil
-    local checkLineColor = PAL.detail
-    if info and info.status == "available" then
-      updLabel = "Update"
-      updateKind = "accent"
-      checkLine = "Checked for updates - v" .. tostring(info.latest) .. " available"
-      checkLineColor = PAL.playTop
-    elseif info and info.status == "current" then
-      updLabel = "Check again"
-      checkLine = "Checked for updates - up to date"
-      checkLineColor = PAL.playTop
-    elseif info and info.status == "error" then
-      checkLine = "Checked for updates - failed"
-      checkLineColor = PAL.chooseTop
-    elseif hasGh then
-      checkLine = "Not checked for updates yet"
-      checkLineColor = PAL.warning
-    end
-    local updW = self.hintFont:getWidth(updLabel) + 24 * s
-    local btnRowW = delW
-    if hasGh then btnRowW = updW + btnGap + verW + btnGap + delW end
-    local clusterW = math.max(chipW, tw)
-    local leftW = math.max(40 * s, innerW - clusterW - 14 * s)
-    local descH = 0
-    if m.description ~= "" then
-      love.graphics.setFont(self.hintFont)
-      local _, dl = self.hintFont:getWrap(m.description, leftW)
-      descH = math.max(1, #dl) * self.hintFont:getHeight()
-    end
-    local clusterH = chipH + 6 * s + th
-    local metaH = self.hintFont:getHeight() + 2 * s
-    if checkLine then
-      metaH = metaH + self.hintFont:getHeight() + 2 * s
-    end
-    if descH > 0 then
-      metaH = metaH + self.hintFont:getHeight() + 2 * s + descH
-    end
-    local bodyH = math.max(nameH + 4 * s + metaH, clusterH)
-    local cardH = padV * 2 + bodyH + 10 * s + btnH
-    layout[i] = { h = cardH, leftW = leftW, clusterW = clusterW,
-      chipText = chipText, chipW = chipW, delW = delW,
-      updW = updW, verW = verW, hasGh = hasGh, clusterH = clusterH,
-      btnRowW = btnRowW, bodyH = bodyH, updLabel = updLabel,
-      updateKind = updateKind, checkLine = checkLine,
-      checkLineColor = checkLineColor }
-    total = total + cardH
+function RomImporter:_modsDefaultHint()
+  if self.isNX then
+    local saveDir = love.filesystem.getSaveDirectory()
+    local rel = RomImporter.mtpHintPath(saveDir)
+    if rel ~= "" and rel:sub(-1) ~= "/" then rel = rel .. "/" end
+    return Strings("Copy a .zip via MTP into %s/imports/mods/\n"
+      .. "DBI MTP → 1: SD Card/%simports/mods/", saveDir, rel)
   end
-  total = total + (#mods - 1) * cardGap
+  if self.android then return Strings("Or copy a mod .zip via USB.") end
+  return Strings("Or drop a mod .zip onto the window.")
+end
 
-  -- Paged, the list band is the list itself: nothing to clip, nothing to scroll
-  -- here, and the page's scrollbar covers the overflow.
-  if paged then listH = total end
-  local maxScroll = math.max(0, total - listH)
-  self._modMax = maxScroll
-  local scroll = clamp(self.modScroll or 0, 0, maxScroll)
-  self.modScroll = scroll
-  self.modRects = {}
-  self.modDeleteRects = {}
-  self.modUpdateRects = {}
-  self.modVersionsRects = {}
-
-  if not paged then
-    love.graphics.setScissor(math.floor(x), math.floor(top),
-      math.ceil(w), math.ceil(listH))
+function RomImporter:_savesDefaultHint(version)
+  if self.isNX then
+    version = self:_resolveSaveVersion(version)
+    local inbox = savesInboxDir(version)
+    local saveDir = love.filesystem.getSaveDirectory()
+    local rel = RomImporter.mtpHintPath(saveDir)
+    if rel ~= "" and rel:sub(-1) ~= "/" then rel = rel .. "/" end
+    local game = GameVersion.info(version).displayName
+    return Strings("Copy a %s .sav via MTP into %s/%s/\n"
+      .. "DBI MTP → 1: SD Card/%s%s/", game, saveDir, inbox, rel, inbox)
   end
-  local cy = top - scroll
-  for i, m in ipairs(mods) do
-    local L = layout[i]
-    local cardH = L.h
-    if cy + cardH >= top and cy <= top + listH then
-      roundedCard(x, cy, w, cardH, cardR)
-      local nx = x + padH
-      local ny = cy + padV
-
-      -- name (ellipsized to leave room for the badge chip) + badge chip
-      love.graphics.setFont(self.warningFont)
-      local badgeTW = self.warningFont:getWidth(m.badge)
-      local badgeW = badgeTW + 12 * s
-      local badgeH = self.warningFont:getHeight() + 6 * s
-      love.graphics.setFont(self.stateFont)
-      col(PAL.white)
-      local drawnName = ellipsize(self.stateFont, m.name, L.leftW - badgeW - 8 * s)
-      printB(drawnName, nx, ny)
-      local bxx = nx + self.stateFont:getWidth(drawnName) + 8 * s
-      local byy = ny + (nameH - badgeH) / 2
-      love.graphics.setLineWidth(1)
-      col(PAL.cardBorder, 0.5)
-      love.graphics.rectangle("line", bxx, byy, badgeW, badgeH, 5 * s, 5 * s)
-      love.graphics.setFont(self.warningFont)
-      col(m.experimental and PAL.gold or PAL.warning)
-      love.graphics.print(m.badge, bxx + 6 * s,
-        byy + (badgeH - self.warningFont:getHeight()) / 2)
-
-      -- version + check status line + description under the name
-      love.graphics.setFont(self.hintFont)
-      col(PAL.detail)
-      local metaY = ny + nameH + 4 * s
-      love.graphics.print("v" .. tostring(m.version or "?"), nx, metaY)
-      metaY = metaY + self.hintFont:getHeight() + 2 * s
-      if L.checkLine then
-        col(L.checkLineColor or PAL.detail)
-        love.graphics.print(
-          ellipsize(self.hintFont, L.checkLine, L.leftW), nx, metaY)
-        metaY = metaY + self.hintFont:getHeight() + 2 * s
-      end
-      if m.description ~= "" then
-        col(PAL.detail)
-        love.graphics.printf(m.description, nx, metaY, L.leftW, "left")
-      end
-
-      -- right cluster: status chip + toggle (action buttons are a bottom row)
-      local clusterX = x + w - padH - L.clusterW
-      local clusterY = cy + padV
-      local _, chipColor = modStatusChip(m.status)
-      local chipX = clusterX + (L.clusterW - L.chipW) / 2
-      col(chipColor, 0.1)
-      love.graphics.rectangle("fill", chipX, clusterY, L.chipW, chipH, chipH / 2, chipH / 2)
-      love.graphics.setLineWidth(1)
-      col(chipColor, 0.55)
-      love.graphics.rectangle("line", chipX, clusterY, L.chipW, chipH, chipH / 2, chipH / 2)
-      love.graphics.setFont(self.hintFont)
-      col(chipColor)
-      printfB(L.chipText, chipX,
-        clusterY + (chipH - self.hintFont:getHeight()) / 2, L.chipW, "center")
-
-      -- toggle switch (ON = green gradient + glow, knob right; OFF = gray, left)
-      local tx = clusterX + (L.clusterW - tw) / 2
-      local ty = clusterY + chipH + 6 * s
-      local rr = th / 2
-      local trect = { x = tx - 6 * s, y = ty - 6 * s,
-        width = tw + 12 * s, height = th + 12 * s, id = m.id }
-      self:_hover(trect)
-      if m.enabled then
-        neonGlow(tx, ty, tw, th, rr, PAL.green, 0.45)
-        fillGradRounded(tx, ty, tw, th, rr, PAL.playTop, PAL.playBot, 1, 1)
-      else
-        col(PAL.disabled, 0.35)
-        love.graphics.rectangle("fill", tx, ty, tw, th, rr, rr)
-      end
-      local kd = th - 6 * s
-      local kcx = m.enabled and (tx + tw - 3 * s - kd / 2) or (tx + 3 * s + kd / 2)
-      col(PAL.white)
-      love.graphics.circle("fill", kcx, ty + th / 2, kd / 2)
-
-      -- Action chip-buttons in one right-aligned row under the body
-      local btnY = cy + cardH - padV - btnH
-      local btnX = x + w - padH - L.btnRowW
-      local darmed = armedDelete(self._confirmDelete, "mod", m.id, nil)
-      local function clipHit(rect, bucket)
-        if not rect then return end
-        local vy = math.max(rect.y, top)
-        local vy2 = math.min(rect.y + rect.height, top + listH)
-        if vy2 > vy then
-          bucket[#bucket + 1] = {
-            x = rect.x, y = vy, width = rect.width, height = vy2 - vy,
-            id = rect.id,
-          }
-        end
-      end
-      if L.hasGh then
-        local urect = self:_chipButton(btnX, btnY, L.updLabel, {
-          w = L.updW, h = btnH, id = m.id, kind = L.updateKind or "neutral",
-        })
-        clipHit(urect, self.modUpdateRects)
-        btnX = btnX + L.updW + btnGap
-        local vrect = self:_chipButton(btnX, btnY, "Versions", {
-          w = L.verW, h = btnH, id = m.id, kind = "neutral",
-        })
-        clipHit(vrect, self.modVersionsRects)
-        btnX = btnX + L.verW + btnGap
-      end
-      local drect = self:_chipButton(btnX, btnY, darmed and "Sure?" or "Delete", {
-        w = L.delW, h = btnH, id = m.id,
-        kind = darmed and "dangerArmed" or "danger",
-      })
-      clipHit(drect, self.modDeleteRects)
+  if self.android then
+    return Strings("Import or export a .sav with the system file picker.")
+  end
+  return Strings("Import a .sav to a new slot, or export the active slot.")
+end
 
       -- toggle hit rect clipped to the visible list band
       local vy = math.max(trect.y, top)
