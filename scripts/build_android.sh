@@ -216,159 +216,46 @@ pack_game_love() {
   say "packing game.love for love-android embed flavor"
   mkdir -p "$EMBED_ASSETS"
   rm -f "$LOVE_FILE"
-  
-  # Detect if running on Windows (Git Bash) or Linux/macOS
-  local is_windows=false
-  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    is_windows=true
+  # tools/save-editor ships with the app: the launcher's Edit button on a save
+  # row opens it in-process, so it must be inside the archive (see build.sh).
+  # Deliberately NO fused mods: a mod inside game.love sits in the read-only
+  # APK, so the mod manager's Delete can't remove it and it reappears every
+  # launch.  Pokewalker ships as an importable .zip instead, which gives it
+  # a real install/upgrade/delete lifecycle.
+  # libs/ carries the vendored FlexLove toolkit the launcher UI is built on
+  # (src/import/LauncherView.lua requires it at the top level, and RomImporter
+  # calls into that view from both update and draw), so an archive without it
+  # dies on the first frame with nothing left to fall back to.
+  (cd "$ROOT" && zip -q -9 -r "$LOVE_FILE" \
+    main.lua conf.lua src libs data assets tools/save-editor \
+    tools/rom_manifest.json tools/rom_manifest_blue.json \
+    tools/rom_manifest_yellow.json \
+    -x '*.DS_Store' -x '*/.git/*' -x '*/.DS_Store' \
+    -x 'data/generated/*' -x 'assets/generated/*')
+  # List once and match against the captured text: piping unzip straight into
+  # grep under `set -o pipefail` SIGPIPEs unzip as soon as grep exits early,
+  # and the pipeline's 141 outranks grep's own status.  For the generated-data
+  # guard that inverted the test -- an archive that really did carry generated
+  # ROM data made grep match, killed unzip, and the `if` read the 141 as "no
+  # match" and let the build through (#774).  Same listing feeds the
+  # required-file gates below, as in scripts/build.sh and scripts/pack_love.sh.
+  local archive_entries
+  archive_entries="$(unzip -Z1 "$LOVE_FILE")"
+  if grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/' \
+      <<< "$archive_entries"; then
+    fail "game.love unexpectedly contains generated ROM data"
   fi
-  
-  if [ "$is_windows" = true ]; then
-    # Use PowerShell for compression since zip is not available on Windows
-    powershell -Command "
-      \$ProgressPreference = 'SilentlyContinue'
-      Set-Location '$WIN_ROOT'
-      \$files = @(
-        'main.lua', 'conf.lua', 'src', 'data', 'assets', 'tools', 'bundlemods'
-      )
-      \$excludePatterns = @(
-        '*.DS_Store', '*/.git/*', '*/.DS_Store', 'data/generated/*', 'assets/generated/*',
-        '*/__pycache__/*', '*.pyc', '*/.pytest_cache/*'
-      )
-      
-      # Get all files recursively with relative paths
-      \$allFiles = @()
-      foreach (\$file in \$files) {
-        if (Test-Path \$file) {
-          if (Test-Path \$file -PathType Leaf) {
-            \$allFiles += @{ Path = \$file; Relative = \$file }
-          } else {
-            Get-ChildItem -Path \$file -Recurse -File | ForEach-Object {
-              \$relative = \$_.FullName.Replace((Get-Location).Path + '\', '').Replace('\', '/')
-              \$allFiles += @{ Path = \$_.FullName; Relative = \$relative }
-            }
-          }
-        }
-      }
-      
-      # Filter out excluded files
-      \$filteredFiles = @()
-      foreach (\$fileInfo in \$allFiles) {
-        \$exclude = \$false
-        \$relativePath = \$fileInfo.Relative
-        foreach (\$pattern in \$excludePatterns) {
-          if (\$relativePath -like \$pattern) {
-            \$exclude = \$true
-            break
-          }
-        }
-        if (-not \$exclude) {
-          \$filteredFiles += \$fileInfo
-        }
-      }
-      
-      # Create directory if it doesn't exist
-      if (-not (Test-Path '$WIN_EMBED_ASSETS')) {
-        New-Item -ItemType Directory -Path '$WIN_EMBED_ASSETS' -Force | Out-Null
-      }
-      
-      # Create zip archive using .NET to preserve directory structure
-      Add-Type -AssemblyName System.IO.Compression.FileSystem
-      \$tempZip = '$WIN_LOVE_FILE.zip'
-      if (Test-Path \$tempZip) { Remove-Item \$tempZip }
-      \$zip = [System.IO.Compression.ZipFile]::Open(\$tempZip, 'Create')
-      
-      foreach (\$fileInfo in \$filteredFiles) {
-        \$entry = \$zip.CreateEntry(\$fileInfo.Relative)
-        \$fs = [System.IO.File]::OpenRead(\$fileInfo.Path)
-        try {
-          \$es = \$entry.Open()
-          try {
-            \$fs.CopyTo(\$es)
-          } finally {
-            \$es.Dispose()
-          }
-        } finally {
-          \$fs.Dispose()
-        }
-      }
-      \$zip.Dispose()
-      
-      # Rename to .love
-      Move-Item -Force \$tempZip '$WIN_LOVE_FILE'
-    "
-  else
-    # Linux/macOS - use standard zip command
-    (cd "$ROOT" && zip -q -9 -r "$LOVE_FILE" \
-      main.lua conf.lua src data assets tools bundlemods \
-      -x '*.DS_Store' 'data/generated/*' 'assets/generated/*' '*/__pycache__/*' '*.pyc' '*/.pytest_cache/*')
-  fi
-  
-  # Verify the archive was created
-  if [ ! -f "$LOVE_FILE" ]; then
-    fail "Failed to create game.love"
-  fi
-  
-  # Verify contents
-  if [ "$is_windows" = true ]; then
-    # Windows - use PowerShell for verification
-    powershell -Command "
-      \$ProgressPreference = 'SilentlyContinue'
-      Add-Type -AssemblyName System.IO.Compression.FileSystem
-      \$zip = [System.IO.Compression.ZipFile]::OpenRead('$WIN_LOVE_FILE')
-      \$entries = \$zip.Entries | ForEach-Object { \$_.FullName }
-      
-      # Check for generated files
-      \$hasGenerated = \$false
-      foreach (\$entry in \$entries) {
-        if (\$entry -match '^(data|assets)/generated/') {
-          \$hasGenerated = \$true
-          break
-        }
-      }
-      if (\$hasGenerated) {
-        Write-Host 'ERROR: game.love unexpectedly contains generated ROM data'
-        exit 1
-      }
-      
-      # Check for tools folder
-      \$hasTools = \$false
-      foreach (\$entry in \$entries) {
-        if (\$entry -like 'tools/*') {
-          \$hasTools = \$true
-          break
-        }
-      }
-      if (-not \$hasTools) {
-        Write-Host 'ERROR: game.love is missing the tools folder'
-        exit 1
-      }
-      
-      \$zip.Dispose()
-      Write-Host 'OK'
-    " || fail "game.love validation failed"
-    
-    # Get file size
-    file_size=$(powershell -Command "(Get-Item '$WIN_LOVE_FILE').Length")
-    file_size_mb=$(powershell -Command "('{0:N2}' -f ((Get-Item '$WIN_LOVE_FILE').Length / 1MB))")
-  else
-    # Linux/macOS - use standard unzip for verification
-    if unzip -Z1 "$LOVE_FILE" \
-      | grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/'; then
-      fail "game.love unexpectedly contains generated ROM data"
-    fi
-    
-    # Check for tools folder
-    if ! unzip -Z1 "$LOVE_FILE" | grep -q '^tools/'; then
-      fail "game.love is missing the tools folder"
-    fi
-    
-    # Get file size
-    file_size=$(stat -f%z "$LOVE_FILE" 2>/dev/null || stat -c%s "$LOVE_FILE" 2>/dev/null)
-    file_size_mb=$(echo "scale=2; $file_size / 1048576" | bc)
-  fi
-  
-  say "game.love: ${file_size_mb}MB -> $LOVE_FILE"
+  grep -qx 'tools/save-editor/App.lua' <<< "$archive_entries" \
+    || fail "game.love is missing the save editor (Edit on a save row would crash)"
+  grep -qx "$YELLOW_MANIFEST_RELATIVE" <<< "$archive_entries" \
+    || fail "game.love is missing the Yellow ROM import manifest"
+  # This gate exists because libs/ was added to scripts/build.sh's payload and
+  # to no other packager, so Android and iOS built an APK/IPA whose launcher
+  # threw on require("libs.flexlove.FlexLove") before drawing anything.  Source
+  # runs read libs/ off the working tree, so only a build can catch it.
+  grep -qx 'libs/flexlove/FlexLove.lua' <<< "$archive_entries" \
+    || fail "game.love is missing the FlexLove UI toolkit (launcher dies on frame 1)"
+  say "game.love: $(du -h "$LOVE_FILE" | cut -f1) -> $LOVE_FILE"
 
   # This script packs its own game.love (it does not reuse build.sh's), so it
   # stamps the release version the same way: patch a copy of Version.lua
