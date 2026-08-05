@@ -2059,6 +2059,39 @@ function RomImporter:runActions(queue)
   end
 end
 
+-- Drain one frame's queued launcher actions; LauncherView.update hands the
+-- batch straight over.  A touch tap fires on EVERY element whose bounds hold
+-- the finger, not only the topmost one: FlexLove gates its mouse path on
+-- Context.findInteractiveAtPosition (libs/flexlove/modules/behaviors/
+-- Clickable.lua) but polls touches per element with a bare bounds test
+-- (EventHandler:processTouchEvents), so a phone tap on a save row's Delete
+-- chip also lands on the row behind it.  Control keys inside a row are the
+-- row's key plus "-<what>", so a row's own action is dropped whenever a
+-- control inside that row queued in the same batch, and #433's disarm runs
+-- here instead of at queue time.  Without both halves an Android tap on
+-- Delete selected the slot and wiped the arm it had just set, so a secondary
+-- slot became the loaded one and could never be deleted (#780).
+function RomImporter:runActions(queue)
+  for i = 1, #queue do
+    local entry = queue[i]
+    local key = type(entry.key) == "string" and entry.key or ""
+    local superseded = false
+    for j = 1, #queue do
+      local other = queue[j]
+      if j ~= i and type(other.key) == "string"
+          and other.key:sub(1, #key + 1) == key .. "-" then
+        superseded = true
+        break
+      end
+    end
+    if not superseded then
+      if not entry.keepArm then self._confirmDelete = nil end
+      local ok, err = pcall(entry.fn)
+      if not ok then print("launcher action error: " .. tostring(err)) end
+    end
+  end
+end
+
 -- Clicks are polled inside FlexLove (mouse + love.touch); host-forwarded
 -- mousepressed stays inert so Android's synthesized mouse path cannot
 -- double-fire a tap (#553).  Touch move/press/release must still reach
