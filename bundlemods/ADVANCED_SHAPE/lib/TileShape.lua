@@ -119,6 +119,14 @@ local FALLBACK_HEIGHTS = {
   stair_w = 16,
   stair_down_e = 16,
   stair_down_w = 16,
+  -- a flight running toward the BACK of the map, drawn head-on instead of
+  -- from the side (the Centers' Cable Club steps).  Its own class because
+  -- the art reading is not the east/west one turned: there a drawn COLUMN
+  -- is a step and a drawn row is height, here a drawn ROW is a step and
+  -- drawn row = depth row, 1:1 into the opening.  `stair_n` climbs away
+  -- from the room, `stair_down_n` descends into a well
+  stair_n = 16,
+  stair_down_n = 16,
 }
 
 -- class -> how the mesher draws it (see the header). The last three are
@@ -208,6 +216,8 @@ local ART = {
   stair_w = "stair",
   stair_down_e = "stair",
   stair_down_w = "stair",
+  stair_n = "stair",
+  stair_down_n = "stair",
 }
 
 local spec = nil          -- the loaded data file, or false when absent
@@ -446,6 +456,8 @@ end
 --
 --   figures = { { w      = <tiles across>,
 --                 depth  = <voxels of body; ABSENT for a person>,
+--                 model  = { ...authored plan layers, bottom first... },
+--                 inset  = <voxels back from the support cell's front>,
 --                 thin   = { rows = <top rows>, depth = <voxels> },
 --                 flat   = { x = { <lx0>, <lx1> }, rows = { <r0>, <r1> } },
 --                 tiles  = { ...w*h tile ids, row-major... },
@@ -464,6 +476,16 @@ end
 --   solid here gets -- a per-pixel slab in world space, standing on the
 --   same furniture the card would have stood on.  The Marts' cash
 --   register is the case: a machine on a counter is a box, not an icon.
+--
+-- `model` is the third answer, and the only one that is not an extrusion
+-- of the drawing at all: an AUTHORED solid, given as plan layers bottom
+-- first, standing at the FRONT of the support cell.  It exists for a
+-- drawing too small to un-project -- the Centers' push bell is 7x6 pixels
+-- of ¾-view dome, and no reading of six rows produces a shape a mask can
+-- extrude without inventing more than it measures.  What it still may not
+-- invent is COLOUR: each layer names the atlas texel its top and its
+-- sides wear, so the solid is painted out of the drawing it replaces and
+-- follows every palette bake exactly like the rest of this file.
 --
 -- Two fields say which parts of such a drawing are NOT the extrusion,
 -- because a solid drawn in one 16x16 GB cell still packs more than one
@@ -534,10 +556,43 @@ local function authoredMasks(list)
                  r0 = math.floor(f.flat.rows[1]),
                  r1 = math.floor(f.flat.rows[2]) }
       end
+      -- an AUTHORED model: plan layers bottom-first, each with the atlas
+      -- texel its top and its sides wear.  Dropped whole on any malformed
+      -- layer, like every other field here -- a typo should leave the
+      -- drawing lying flat, not build half a solid.
+      local model = nil
+      if type(f.model) == "table" and #f.model > 0 then
+        model = {}
+        for _, L in ipairs(f.model) do
+          local plan = type(L) == "table" and L.plan
+          local mw = (type(plan) == "table" and type(plan[1]) == "string")
+                     and #plan[1] or 0
+          local okL = mw > 0 and type(L.top) == "table"
+                      and type(L.side) == "table"
+          if okL then
+            for _, r in ipairs(plan) do
+              if type(r) ~= "string" or #r ~= mw then okL = false break end
+            end
+          end
+          if not okL then model = nil break end
+          local cells = {}
+          for dz = 0, #plan - 1 do
+            local r = plan[dz + 1]
+            for dx = 0, mw - 1 do
+              if r:sub(dx + 1, dx + 1) ~= "0" then cells[dz * mw + dx] = true end
+            end
+          end
+          model[#model + 1] = { w = mw, d = #plan, cells = cells,
+                                top = L.top, side = L.side }
+        end
+      end
       if n > 0 then
         out[#out + 1] = { w = w, h = h, n = n, mask = mask,
                           tiles = f.tiles, under = f.under,
                           depth = depth and math.floor(depth) or nil,
+                          model = model,
+                          inset = model and math.floor(tonumber(f.inset) or 0)
+                                  or nil,
                           thin = thin, flat = flat }
       end
     end
@@ -684,6 +739,50 @@ function TileShape.bookcaseRelief(tilesetId)
   local s = load()
   local entry = s and s.tilesets and s.tilesets[tilesetId]
   return not (entry and entry.bookcase_relief == false)
+end
+
+--- What a `wall` cell's TOP face wears in this tileset (a tileset entry's
+--- wall_top).  Returns a function tile -> cap tile id (nil for "leave it
+--- alone"), or nil when the tileset says nothing at all.
+---
+--- A wall band is 16px of art folded upright over a run two drawn rows
+--- deep, so it folds ENTIRELY onto its face and has no row left to lay
+--- flat on top -- the top then repeats the face, and a house's town-map
+--- poster and window came out lying across the top of the wall as well as
+--- hanging on it.  What is up there is the wall's capping course, which is
+--- the plain panel the decorated column's own neighbours draw; naming it
+--- is the whole fix, because "plain" is a fact about the drawing that
+--- nothing in the geometry can measure.
+---
+--- Two forms, because tilesets differ in how far one answer reaches:
+---
+---   wall_top = <id>            EVERY wall cell caps with this course.
+---                              Right where one atlas dresses one kind of
+---                              room -- the town house, the Centers, Red's
+---                              two floors all cap with their own blank
+---                              panel, and a list keyed by the decorated
+---                              tiles would need extending every time a
+---                              map hung something new on the same wall.
+---   wall_top = { [tile] = id } only these tiles are redirected.  Right
+---                              where one atlas dresses several rooms:
+---                              LOBBY is the department store, the Game
+---                              Corner, Silph's floors, the roof AND the
+---                              Rocket lift, and the lift's cabin frame is
+---                              not what a shop wall caps with.
+function TileShape.wallTop(tilesetId)
+  local s = load()
+  local entry = s and s.tilesets and s.tilesets[tilesetId]
+  local spec = entry and entry.wall_top
+  if type(spec) == "number" then
+    return function() return spec end
+  end
+  if type(spec) == "table" then
+    return function(tile)
+      local cap = spec[tile]
+      return type(cap) == "number" and cap or nil
+    end
+  end
+  return nil
 end
 
 -- Drop the cache: a mod that shadows data/voxel_heights.lua or a tileset

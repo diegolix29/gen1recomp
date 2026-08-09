@@ -79,16 +79,6 @@ end)
 
 local Sky = {}
 
--- Get the sky image from the main game's Tilt system
--- This respects all the options: pixelation, offset, zoom, enabled state
-local function getSkyImage()
-  if not (okTilt and Tilt) then return nil end
-  -- Use Tilt:isSkyEnabled() to check if sky is enabled in options
-  if not Tilt:isSkyEnabled() then return nil end
-  -- Use Tilt:getSkyImage() to get the image with pixelation applied
-  return Tilt:getSkyImage()
-end
-
 -- ------- clouds
 -- Three decks rather than one sheet.  A single plane reads as flat
 -- because it IS flat; stacking thin ones at different heights, tile
@@ -1064,40 +1054,20 @@ function Sky.draw(state)
   local starNote = ""
 
   -- ---- draw custom sky image if available (replaces solid color background)
-  -- Use the same Tilt system as the main game for consistency
+  -- Use the same Tilt system as the main game for consistency, and the
+  -- same shared Quad-based panorama draw (Tilt:drawSkyPanorama) the base
+  -- Renderer and the ADVANCED_SHAPE mod use -- see Tilt:drawSkyLayer for
+  -- why this fixes both the black-rectangle bug and the sky never really
+  -- panning past a quarter turn. This build predates DayNight's phase
+  -- mix (see the header on FirstPerson above), so no weights are passed:
+  -- it shows whichever single image resolves as "day".
   -- This should be drawn BEFORE the backdrop so the horizon appears in front
-  local customSkyImg = getSkyImage()
-  if customSkyImg and okTilt and Tilt then
+  if okTilt and Tilt then
     guarded(function()
       love.graphics.setDepthMode("lequal", false)
-      love.graphics.setColor(1, 1, 1, 1)
-      
-      -- Get the screen dimensions for proper scaling (same as base game)
       local ww, wh = love.graphics.getDimensions()
-      local skyW = customSkyImg:getWidth()
-      local skyH = customSkyImg:getHeight()
-      
-      -- Apply the same transformations as the main game:
-      -- zoom, offset, rotation from Tilt.options
-      local zoom = Tilt.options and Tilt.options.skyZoom or 1.0
-      local offsetY = Tilt.options and Tilt.options.skyOffsetY or 0
-      local rotation = Tilt.skyRotation or 0
-      local bounce = Tilt.skyBounceOffset or 0
-      rotation = rotation + bounce
-      
-      -- Use full screen dimensions for scaling (same as base game)
-      local scaleX = (ww / skyW) * zoom
-      local scaleY = (wh / skyH) * zoom
-      
-      -- Convert rotation angle to x offset (same as base game)
-      local xOffset = (rotation / (2 * math.pi)) * skyW * scaleX
-      xOffset = xOffset + (ww / 2)
-      local yOffset = offsetY * wh
-      
-      -- Draw sky with seamless wrapping (same as base game)
-      love.graphics.draw(customSkyImg, xOffset, yOffset, 0, scaleX, scaleY)
-      love.graphics.draw(customSkyImg, xOffset - (skyW * scaleX), yOffset, 0, scaleX, scaleY)
-      
+      Tilt:drawSkyPanorama(ww, wh)
+      love.graphics.setColor(1, 1, 1, 1)
       love.graphics.setDepthMode("lequal", true)
     end)
   end

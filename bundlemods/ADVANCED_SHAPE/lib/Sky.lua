@@ -60,14 +60,35 @@ end)
 
 local Sky = {}
 
--- Get the sky image from the main game's Tilt system
--- This respects all the options: pixelation, offset, zoom, enabled state
+-- The four image slots fold onto the clock's SIX named phases (see
+-- DayNight.mix): the two that only ever appear as blend WAYPOINTS
+-- ("golden" between day and dusk, "violet" between dusk and night) split
+-- their weight across the pair of image slots either side of them,
+-- rather than needing image slots of their own. This keeps the picture
+-- crossfading continuously through the whole clock on exactly the four
+-- images the player actually sets, instead of snapping at each of the
+-- six palette waypoints.
+local function skyPhaseWeights()
+  local mix = DayNight.mix(DayNight.time())
+  local golden = mix.golden or 0
+  local violet = mix.violet or 0
+  return {
+    day   = (mix.day or 0) + golden * 0.5,
+    dusk  = (mix.dusk or 0) + golden * 0.5 + violet * 0.5,
+    night = (mix.night or 0) + violet * 0.5,
+    dawn  = (mix.dawn or 0),
+  }
+end
+
+-- Get the current sky image(s) from the main game's Tilt system, cross-
+-- faded across whichever of the four time-of-day images are loaded. This
+-- respects all the options: pixelation, offset, zoom, rotation, enabled
+-- state. Returns primaryImg, secondaryImg, secondaryAlpha -- see
+-- Tilt:getSkyBlend.
 local function getSkyImage()
   if not (okTilt and Tilt) then return nil end
-  -- Use Tilt:isSkyEnabled() to check if sky is enabled in options
   if not Tilt:isSkyEnabled() then return nil end
-  -- Use Tilt:getSkyImage() to get the image with pixelation applied
-  return Tilt:getSkyImage()
+  return Tilt:getSkyBlend(skyPhaseWeights())
 end
 
 -- The most bands a phase palette may paint with. Eight leaves headroom over
@@ -167,16 +188,21 @@ function Sky.dress(sky)
   local haze = bands and bands[#bands]
   if not (sky and haze) then return sky end
   
-  -- Check if custom sky image is available and enabled
-  local customSky = getSkyImage()
+  -- Check if custom sky image(s) are available and enabled. Up to two
+  -- come back -- the current phase's image and, mid-transition, the next
+  -- phase's -- to cross-fade smoothly across dawn/day/dusk/night instead
+  -- of hard-cutting the picture the moment the clock ticks over.
+  local customSky, customSky2, customAlpha2 = getSkyImage()
   if customSky then
-    -- When using custom sky image, set the descriptor to indicate image usage
     sky.customImage = customSky
+    sky.customImage2 = customSky2
+    sky.customAlpha2 = customAlpha2
     -- Store Tilt reference for accessing options during paint
     sky.tiltRef = Tilt
     -- Still set a fallback color, but the image will take precedence
     sky[1], sky[2], sky[3] = haze[1], haze[2], haze[3]
   else
+    sky.customImage, sky.customImage2, sky.customAlpha2 = nil, nil, nil
     -- Use the original solid color behavior
     sky[1], sky[2], sky[3] = haze[1], haze[2], haze[3]
   end
@@ -602,6 +628,15 @@ function Sky.discLooming(glowAmt, moon)
   return (glowAmt or 0) > 0.25 and not moon
 end
 
+-- Reused Quad objects so a steady 60fps of sky drawing does not allocate
+-- one every frame; each phase keeps its own so cross-fading between two
+-- images never has them fighting over the same viewport.
+-- (The actual panorama math lives on Tilt:drawSkyLayer -- see there for
+-- why a Quad fixes both the black-rectangle bug and the "not really 360"
+-- one. It is one shared implementation so the base Renderer's flat blit
+-- and this mod's 3D pass can never drift apart again the way they did
+-- before.)
+
 -- Paint the sky into the bound canvas, filling it from the top edge down to
 -- `horizonY` (or to SPAN of the frame when the horizon is out of it).
 --
@@ -657,7 +692,9 @@ function Sky.paint(w, h, sky, horizonY, cell, body, top, axis, ray)
   local alpha = sky[4] or 1
   cell = math.max(1, math.floor((cell or 1) + 0.5))
 
-  -- Check if custom sky image is available and use it instead of gradient
+  -- Check if a custom sky image is available and use it instead of the
+  -- gradient. Up to two images draw, back to front, so the picture
+  -- cross-fades between time-of-day phases instead of cutting hard.
   local customSky = sky.customImage
   local tiltRef = sky.tiltRef
   if customSky and tiltRef then
@@ -670,32 +707,15 @@ function Sky.paint(w, h, sky, horizonY, cell, body, top, axis, ray)
     if g.getBlendMode then blend, blendAlpha = g.getBlendMode() end
     if g.setBlendMode then g.setBlendMode("alpha") end
 
-    -- Draw custom sky image using EXACTLY the same logic as the main game Renderer
-    g.setColor(1, 1, 1, alpha)
-    local imgW, imgH = customSky:getDimensions()
-    
-    -- Get full screen dimensions (not just sky region)
-    local ww, wh = w, h  -- Use full canvas dimensions
-    
-    -- Apply Tilt options: zoom, offset, rotation (same as base game)
-    local zoom = tiltRef.options and tiltRef.options.skyZoom or 1.0
-    local offsetY = tiltRef.options and tiltRef.options.skyOffsetY or 0
-    local rotation = tiltRef.skyRotation or 0
-    local bounce = tiltRef.skyBounceOffset or 0
-    rotation = rotation + bounce
-    
-    -- Use full screen dimensions for scaling (same as base game)
-    local scaleX = (ww / imgW) * zoom
-    local scaleY = (wh / imgH) * zoom
-    
-    -- Convert rotation angle to x offset (same as base game)
-    local xOffset = (rotation / (2 * math.pi)) * imgW * scaleX
-    xOffset = xOffset + (ww / 2)  -- Center with full screen width
-    local yOffset = offsetY * wh  -- Use full screen height for offset
-    
-    -- Draw with seamless wrapping (same as base game)
-    g.draw(customSky, xOffset, yOffset, 0, scaleX, scaleY)
-    g.draw(customSky, xOffset - (imgW * scaleX), yOffset, 0, scaleX, scaleY)
+    -- Full canvas, not just the sky's own region: the image is the whole
+    -- backdrop the world sits in front of, same as the gradient's own
+    -- rectangle when tilted/ray'd (see the `axis or ray` fallback below).
+    local ww, wh = w, h
+    tiltRef:drawSkyLayer(customSky, alpha, ww, wh, "advshape-a")
+    local secondAlpha = (sky.customAlpha2 or 0) * alpha
+    if sky.customImage2 and secondAlpha > 0.01 then
+      tiltRef:drawSkyLayer(sky.customImage2, secondAlpha, ww, wh, "advshape-b")
+    end
 
     -- Still draw the celestial body (sun/moon) if present
     if not (axis or ray) then
@@ -834,6 +854,9 @@ function Sky.invalidate()
     pcall(discBake.img.release, discBake.img)
   end
   discBake.key, discBake.img = nil, nil
+  -- the shared Tilt-side sky Quads (see Tilt:drawSkyLayer) are this
+  -- graphics context's too, and get dropped there on the same events
+  pcall(function() require("src.render.Tilt"):invalidateSkyQuads() end)
 end
 
 return Sky

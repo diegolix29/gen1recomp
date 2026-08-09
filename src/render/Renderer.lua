@@ -907,35 +907,15 @@ function Renderer:endFrame(zones, worldZones)
   end
 
   if self.worldOverride then
-    -- Draw sky image before mod's world override (background layer)
-    if Tilt:isSkyEnabled() then
-      local sky = Tilt:getSkyImage()
-      if sky then
-        love.graphics.setColor(1, 1, 1, 1)
-        -- Pan horizontally for panoramic effect instead of rotating
-        local rotation = Tilt.skyRotation or 0
-        -- Add bounce offset for left/right movement
-        local bounce = Tilt.skyBounceOffset or 0
-        rotation = rotation + bounce
-        local skyW = sky:getWidth()
-        local skyH = sky:getHeight()
-        -- Apply sky zoom factor from options
-        local zoom = Tilt.options and Tilt.options.skyZoom or 1.0
-        -- Apply vertical offset from options (in screen height units)
-        local offsetY = Tilt.options and Tilt.options.skyOffsetY or 0
-        local scaleX = (ww / skyW) * zoom
-        local scaleY = (wh / skyH) * zoom
-        -- Convert rotation angle to x offset (full 360 degrees = full image width)
-        local xOffset = (rotation / (2 * math.pi)) * skyW * scaleX
-        -- Center the image initially (offset by half screen width)
-        xOffset = xOffset + (ww / 2)
-        -- Apply vertical offset (multiplied by screen height)
-        local yOffset = offsetY * wh
-        -- Draw twice for seamless wrapping
-        love.graphics.draw(sky, xOffset, yOffset, 0, scaleX, scaleY)
-        love.graphics.draw(sky, xOffset - (skyW * scaleX), yOffset, 0, scaleX, scaleY)
-      end
-    end
+    -- Draw sky image before mod's world override (background layer). A
+    -- mod with its own time-of-day system (see the ADVANCED_SHAPE mod's
+    -- Sky.lua) draws its own sky INSIDE that override texture, so this
+    -- draw is usually fully covered by it -- it only shows through during
+    -- a frame where the override hasn't painted yet (e.g. a fade). No
+    -- weights are passed: this base path has no day/night clock of its
+    -- own, so it shows whichever single image getSkyBlend resolves to
+    -- (day, if set -- see Tilt:getSkyBlend's fallback order).
+    Tilt:drawSkyPanorama(ww, wh)
     -- A render pipeline already produced the whole world -- terrain,
     -- characters and its own FX overlay -- as one window-resolution image,
     -- so it composites with a straight 1:1 blit and the world canvas is
@@ -980,35 +960,9 @@ function Renderer:endFrame(zones, worldZones)
     -- falls through to the flat blit, keeping the flat frame byte-for-byte
     -- identical to today.
     
-    -- Draw sky image BEFORE world rendering (background layer)
-    if Tilt:isSkyEnabled() then
-      local sky = Tilt:getSkyImage()
-      if sky then
-        love.graphics.setColor(1, 1, 1, 1)
-        -- Pan horizontally for panoramic effect instead of rotating
-        local rotation = Tilt.skyRotation or 0
-        -- Add bounce offset for left/right movement
-        local bounce = Tilt.skyBounceOffset or 0
-        rotation = rotation + bounce
-        local skyW = sky:getWidth()
-        local skyH = sky:getHeight()
-        -- Apply sky zoom factor from options
-        local zoom = Tilt.options and Tilt.options.skyZoom or 1.0
-        -- Apply vertical offset from options (in screen height units)
-        local offsetY = Tilt.options and Tilt.options.skyOffsetY or 0
-        local scaleX = (ww / skyW) * zoom
-        local scaleY = (wh / skyH) * zoom
-        -- Convert rotation angle to x offset (full 360 degrees = full image width)
-        local xOffset = (rotation / (2 * math.pi)) * skyW * scaleX
-        -- Center the image initially (offset by half screen width)
-        xOffset = xOffset + (ww / 2)
-        -- Apply vertical offset (multiplied by screen height)
-        local yOffset = offsetY * wh
-        -- Draw twice for seamless wrapping
-        love.graphics.draw(sky, xOffset, yOffset, 0, scaleX, scaleY)
-        love.graphics.draw(sky, xOffset - (skyW * scaleX), yOffset, 0, scaleX, scaleY)
-      end
-    end
+    -- Draw sky image BEFORE world rendering (background layer). See the
+    -- worldOverride branch above for why no weights are passed here.
+    Tilt:drawSkyPanorama(ww, wh)
     
     local projected =
       Tilt.active() and self:drawTiltedWorld(worldZones or zones, sx, sy, wox, woy, present)

@@ -264,15 +264,11 @@ function Game:update(dt)
   -- Check if top state is OverworldState (has isOverworld marker)
   if topState and topState.isOverworld and topState.player then
     local p = topState.player
-    local dx, dy = 0, 0
-    if p.facing == "left" then dx = -1
-    elseif p.facing == "right" then dx = 1
-    elseif p.facing == "up" then dy = -1
-    elseif p.facing == "down" then dy = 1
-    end
-    if p.moving then
-      require("src.render.Tilt").updateSkyRotation(dx, dy)
-    end
+    -- The sky image pans to the player's actual compass facing (a full
+    -- 360 panorama has a "right" answer for where the horizon sits), not
+    -- just a nudge while moving -- so this runs every frame, and a player
+    -- standing still facing east still sees east's slice of the sky.
+    require("src.render.Tilt").updateSkyRotation(p.facing, p.moving)
   end
   -- mod render pipelines tween on the same real-frame clock, for the same
   -- reason: they are presentational, so fast-forward must not speed them up
@@ -1203,30 +1199,6 @@ function Game:restoreSave(loaded, recovered)
     ModRuntime.emit("save.loaded",
       { save = loaded, meta = loaded.meta, modsDiff = modsDiff })
   end
-end
-
--- Reconstruct a previously validated runtime checkpoint without replaying the
--- ordinary CONTINUE lifecycle. In particular, map onEnter scripts and
--- save.loading/save.loaded events must not run a second time. Validation,
--- identity checks and transactional rollback live in Checkpoint.lua.
-function Game:restoreCheckpointSave(loaded)
-  self.save = loaded
-  self:adoptSave(loaded)
-  while self.stack:top() do self.stack:pop() end
-  self.stack:push(self.overworld, loaded.player.map,
-                  loaded.player.x, loaded.player.y, loaded.player.facing,
-                  { via = "checkpoint", checkpoint = true })
-end
-
--- Install a reconstructed battle without calling BattleState:enter(), whose
--- transition, intro queues and battle-start side effects already happened in
--- the checkpointed timeline.
-function Game:restoreCheckpointBattle(battle)
-  if self.stack:top() ~= self.overworld then
-    error("battle checkpoint requires a reconstructed overworld base", 0)
-  end
-  self.stack.states[#self.stack.states + 1] = battle
-  if battle.resumeCheckpoint then battle:resumeCheckpoint() end
 end
 
 return Game

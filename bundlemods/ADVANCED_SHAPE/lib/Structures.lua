@@ -227,7 +227,11 @@ function Structures.forMap(map)
   S = { shapeAt = shapeAt, tileAt = tileAt, outdoor = Map.isOutdoor(def),
         hideBareRing = hullRingOnly or nil,
         runs = {}, skip = {}, ground = {}, doorFold = {}, objectQuads = {},
-        grassQuads = {}, flowerQuads = {}, roundStamps = {}, figures = {} }
+        grassQuads = {}, flowerQuads = {}, roundStamps = {}, figures = {},
+        -- tile key -> the row a collapsed bookcase rank's box actually
+        -- stands on, so a standee supported by one lands on it rather than
+        -- where the drawing put it (see buildBookcases)
+        bookcaseBox = {} }
   Buildings.build(S, map, pixels(tileset), perRow)
 
   -- Fold doors into their buildings. A door cell is WALKABLE (the player
@@ -1882,6 +1886,12 @@ local function bookcaseRank(S, map, perRow, run, i, j, k, pane, srcU, srcV,
   end
 end
 
+-- The arts a `bookcase_backfill = "above"` row may inherit: terrain and
+-- solid bodies only (see the note at the backfill itself).  Everything
+-- absent here -- billboard, post, cylinder, grass, flower -- is a per-pixel
+-- object STANDING on terrain rather than terrain.
+local BACKFILL_ART = { flat = true, top = true, upright = true }
+
 function Structures.buildBookcases(S, map, x0, x1, y0, y1, data, perRow)
   perRow = perRow or map.tileset.tilesPerRow or 16
   -- What to do with the rows a rank VACATES (see TileShape.bookcaseBackfill).
@@ -1928,11 +1938,32 @@ function Structures.buildBookcases(S, map, x0, x1, y0, y1, data, perRow)
           -- shelf standing in a room.  `bookcase_backfill = "above"` hands it
           -- the cell above the run instead, shape and art, so a wall cut into
           -- a terrace has more terrace behind it rather than a trench.
+          --
+          -- Only BODY above backfills: a vacated row wants more of the
+          -- terrace the wall is cut into, and the terrace is whatever lies
+          -- flat, tops out or stands as a solid face.  A per-pixel STANDEE
+          -- above -- a statue, a sign, a bush -- is an object standing ON
+          -- that terrace, and copying it northward builds a second and a
+          -- third of it: Indigo Plateau's avenue statues sit directly on
+          -- the pilasters that collapse here, so every bird came out
+          -- duplicated twice down the shaft behind itself.  A standee
+          -- above means the row has no terrace to inherit, so it takes the
+          -- default and is painted with synthesized ground.
           local covered = math.min(2, front - top + 1)
           local srcK = keyOf(tx, top - 1)
           local src = backfill == "above" and S.shapeAt[srcK] or nil
+          if src and not BACKFILL_ART[src.art] then src = nil end
+          -- Where the box ACTUALLY ends up, remembered for every row of the
+          -- rank: the collapse walks the whole drawn run onto its southmost
+          -- cell, so anything that has to stand ON the box has to be told
+          -- where the box went.  A statue keys off the cell below its own
+          -- drawing, which is the run's NORTH end -- two rows away from the
+          -- box on a two-cell pilaster, which is exactly the distance the
+          -- Plateau's birds floated by.
+          local boxTop = front - covered + 1
           for cy = top, front do
             local tk = keyOf(tx, cy)
+            S.bookcaseBox[tk] = boxTop
             if src and cy <= front - covered then
               S.shapeAt[tk] = src
               S.tileAt[tk] = S.tileAt[srcK]
@@ -1992,6 +2023,10 @@ end
 -- walls) wear the matching slice of that drawing -- the railing's
 -- diagonal lands along the stepped silhouette -- while treads sample the
 -- art band drawn at their own height.
+--
+-- stair_n / stair_down_n are the same pair of flights running INTO the
+-- map rather than across it, for a staircase drawn head-on; that changes
+-- the art reading enough to need its own branch below.
 local STAIR_STEPS = 4
 
 local STAIR_SHADE = { south = 1.0, north = 0.68, tread = 1.0,
@@ -2004,7 +2039,9 @@ local function stairCell(S, map, data, cx, cy, s)
   local atlasW = map.tileset.imageWidth or 128
   local atlasH = map.tileset.imageHeight or 48
   local quads = S.objectQuads
-  local down = s.class == "stair_down_e" or s.class == "stair_down_w"
+  local north = s.class == "stair_n" or s.class == "stair_down_n"
+  local down = s.class == "stair_down_n" or s.class == "stair_down_e"
+             or s.class == "stair_down_w"
   local east = s.class == "stair_e" or s.class == "stair_down_e"
   local mx, mz = cx * 16, cy * 16
   local h = s.h or 16
@@ -2051,6 +2088,114 @@ local function stairCell(S, map, data, cx, cy, s)
         end
       end
     end
+  end
+
+  -- A flight running INTO the map instead of across it.  The drawing is
+  -- the same staircase seen head-on rather than from the side, and that
+  -- changes which axis of the art means what: a drawn ROW is a step here,
+  -- and -- because looking down a well is looking along its depth -- drawn
+  -- row IS depth row, 1:1 across the cell's 16.
+  --
+  -- The Centers' steps state their own band table and it lands exactly:
+  -- 4 white rows, 1 black, 3 grey, 1 black, 3 checker, 4 black = 16.  So
+  -- an even four-step division puts a black NOSING on the southmost row of
+  -- every band (15, 11, 7, 3) and leaves the rows behind it as that step's
+  -- tread.  Nothing is authored but the RISE, which no head-on drawing can
+  -- state; the depths, the treads and the nosings are all measured.
+  --
+  -- A nosing is drawn as one row because it is seen nearly edge-on, so
+  -- un-projected it has real height and no depth: its row lies flat as the
+  -- tread's front lip AND stands as the riser under it.  That is the one
+  -- texel in the flight used twice, and using it twice is what a nosing is.
+  --
+  -- The well's own walls come free as well: the drawing's first and last
+  -- COLUMNS are its black side walls, and its top band is the darkness the
+  -- flight leaves by, which is what the far end wants to wear.
+  --
+  -- A flight CLIMBING away (`stair_n`) is the same reading with the sign of
+  -- the rise flipped -- bands still run south to north, drawn row is still
+  -- depth row, the nosing still serves twice.  Two things follow from the
+  -- sign.  The risers turn around: a flight descending away from you closes
+  -- its steps from below and shows you their backs, one climbing away shows
+  -- you their FRONTS, so they face south.  And the drawing's black side
+  -- columns stop being a well's walls and become the walls of the opening
+  -- the flight climbs into: they run from each tread UP to the top of the
+  -- wall band rather than down from the floor.  At the last step the flight
+  -- has reached that top and there is no opening left to wall.
+  --
+  -- Every quad here is split at the cell's own 8px seam, in x and in rows
+  -- both: `uv` resolves ONE tile per corner, and these four tiles are not
+  -- neighbours in the atlas, so a quad that spans a seam interpolates
+  -- between two unrelated corners of the sheet.
+  if north then
+    local runD = 16 / STAIR_STEPS
+    local HALVES = { { 0.2, 7.9, 0, 8 }, { 8.1, 15.8, 8, 16 } }
+    for i = 0, STAIR_STEPS - 1 do
+      local a0 = 16 - (i + 1) * runD           -- band i, in art rows
+      local a1 = a0 + runD
+      local yTop = (down and -1 or 1) * (i + 1) * rise
+      local ry = (down and -1 or 1) * i * rise        -- the step behind it
+      local z0b, z1b = mz + a0, mz + a1
+
+      for _, H in ipairs(HALVES) do
+        local ax0, ax1, wx0, wx1 = H[1], H[2], mx + H[3], mx + H[4]
+
+        -- the tread: the whole band, drawn row = depth row, so the nosing
+        -- lies on its front lip exactly where the artist drew it
+        face({ wx0, yTop, z0b }, { wx1, yTop, z0b },
+             { wx1, yTop, z1b }, { wx0, yTop, z1b },
+             ax0, a1, ax1, a0,
+             down and STAIR_SHADE.wellTread or STAIR_SHADE.tread)
+
+        -- the riser at that lip, one art row tall -- so it needs none of
+        -- `banded`'s row splitting, and written straight keeps the geometry
+        -- flush at the seam while the art stays inside its tile.  Facing
+        -- north when the flight descends (the steps are closed from below,
+        -- not looked at) and south when it climbs
+        if down then
+          face({ wx1, yTop, z1b }, { wx0, yTop, z1b },
+               { wx0, ry, z1b }, { wx1, ry, z1b },
+               ax1, a1 - 1, ax0, a1, STAIR_SHADE.riser)
+        else
+          face({ wx0, ry, z1b }, { wx1, ry, z1b },
+               { wx1, yTop, z1b }, { wx0, yTop, z1b },
+               ax0, a1 - 1, ax1, a1, STAIR_SHADE.riser)
+        end
+
+        -- the deep end, closing the opening this flight is cut into: from
+        -- the floor of the well up to the top of the wall band beside it,
+        -- in the drawing's own black top rows.  A climbing flight has no
+        -- such end -- its top tread stands at the wall's own height and
+        -- fills the opening
+        if down and i == STAIR_STEPS - 1 then
+          face({ wx1, -h, mz }, { wx0, -h, mz },
+               { wx0, h, mz }, { wx1, h, mz },
+               ax1, 3.9, ax0, 0.1, STAIR_SHADE.wellEnd)
+        end
+      end
+
+      -- the opening's side walls beside this tread, wearing the drawing's
+      -- own black edge columns -- excavation or recess, it is walled in its
+      -- own texels.  Descending they run from the tread up to the floor,
+      -- climbing from the tread up to the top of the wall band
+      local wallTop = down and 0 or h
+      local function sideWall(px, sx0, sx1, inward)
+        local c
+        if inward then                                  -- west wall, faces E
+          c = { { px, yTop, z1b }, { px, yTop, z0b },
+                { px, wallTop, z0b }, { px, wallTop, z1b } }
+        else                                            -- east wall, faces W
+          c = { { px, yTop, z0b }, { px, yTop, z1b },
+                { px, wallTop, z1b }, { px, wallTop, z0b } }
+        end
+        face(c[1], c[2], c[3], c[4], sx0, a1, sx1, a0, STAIR_SHADE.wellN)
+      end
+      if wallTop > yTop then
+        sideWall(mx, 0.1, 1.3, true)
+        sideWall(mx + 16, 14.7, 15.9, false)
+      end
+    end
+    return
   end
 
   for i = 0, STAIR_STEPS - 1 do
@@ -2152,6 +2297,7 @@ function Structures.buildStairs(S, map, x0, x1, y0, y1)
         -- box or floor it.  A rising flight stands on the map's common
         -- floor; a stairwell IS the hole, so nothing is painted under it
         local down = s.class == "stair_down_e" or s.class == "stair_down_w"
+                  or s.class == "stair_down_n"
         for dy = 0, 1 do
           for dx = 0, 1 do
             local tk = keyOf(cx * 2 + dx, cy * 2 + dy)
@@ -2253,6 +2399,43 @@ function Structures.buildVolume(S, map, tiles)
   -- whether the region's dominant columns are flat repeats (a cliff
   -- mound's plateau) rather than drawn facades (a house's front)
   local modeRepeat = (repeatVotes[modeH] or 0) * 2 > modeN
+
+  -- Whether this REGION's tops are a rim over a uniform body -- what every
+  -- cliff mound is drawn as: a top edge, then the same rock the whole way
+  -- down. The top face may then lay that rim once along its north edge and
+  -- hold the body after it, instead of cycling the rim back every second
+  -- tile and striping a plateau with edges it should not have.
+  --
+  -- Answered per column AND per region, because each catches what the
+  -- other misses. A mound is one structure many columns wide, and the
+  -- columns carrying its cave mouth read differently from their neighbours
+  -- (their drawing ends in the mouth's own tiles): per column alone, those
+  -- kept cycling while the rest held, leaving rim stubs above the doorway.
+  -- But a region vote alone silences a genuine rim-over-body column that
+  -- happens to stand in a region of repeating art -- three of them in the
+  -- Safari Zone. A column holds if EITHER says so.
+  --
+  -- Art that genuinely repeats is not uniform and keeps cycling: the
+  -- Safari Zone's fence alternates two tiles the whole way down, and there
+  -- the repeat IS what the drawing says.
+  local uniformVotes, uniformTotal = 0, 0
+  for _, r in ipairs(runs) do
+    local run = r.run
+    if run.extent > 2 then
+      uniformTotal = uniformTotal + 1
+      local body = map:tileAt(r.tx, run.north + 1)
+      local uniform = true
+      for d = 2, run.extent - 1 do
+        if map:tileAt(r.tx, run.north + d) ~= body then
+          uniform = false
+          break
+        end
+      end
+      run.ownUniform = uniform
+      if uniform then uniformVotes = uniformVotes + 1 end
+    end
+  end
+  local regionUniform = uniformTotal > 0 and uniformVotes * 2 > uniformTotal
   for _, r in ipairs(runs) do
     local run = r.run
     local h = run.unit * 8
@@ -2300,6 +2483,7 @@ function Structures.buildVolume(S, map, tiles)
     run.rise = roofRows * 8
     run.peak = h
     run.h = h - run.rise               -- facade height: what sides build to
+    run.topUniform = run.ownUniform or regionUniform
     for ty = run.north, run.front do
       S.runs[keyOf(r.tx, ty)] = run
     end
@@ -2687,9 +2871,10 @@ function Structures.buildObject(S, map, region, cluster,
   -- Town is where it showed: pinning the cliff's slope chain gave the
   -- posts along the cliff edge an authored 16px box to their south, and
   -- they were hoisted to stand on the clifftop instead of the path.
-  local baseY, support = 0, nil
+  local baseY, support, supportRow = 0, nil, nil
   if force and force ~= "opaque" then
-    local bs = S.shapeAt[keyOf(cluster.minX, cluster.maxY + 1)]
+    local belowK = keyOf(cluster.minX, cluster.maxY + 1)
+    local bs = S.shapeAt[belowK]
     local blocked = not map:isWalkableCell(math.floor(cluster.minX / 2),
                                            math.floor(cluster.maxY / 2))
     -- `bookcase` supports as well as `upright`.  A prop drawn above an
@@ -2706,6 +2891,13 @@ function Structures.buildObject(S, map, region, cluster,
        and (bs.art == "upright" or bs.art == "bookcase"
             or bs.class == "building") then
       baseY, support = bs.h, bs
+      -- A bookcase support has MOVED: the collapse walks the whole drawn
+      -- run onto its southmost cell, and the cell tested above is the run's
+      -- north end.  On the Plateau's two-cell pilasters that is a full cell
+      -- away, and the bird stood at the right HEIGHT over open ground with
+      -- its pillar behind it -- floating.  Stand it on the box's own north
+      -- row instead of one row south of its drawing.
+      supportRow = S.bookcaseBox[belowK]
     end
   end
   local atlasW = map.tileset.imageWidth or 128
@@ -2757,8 +2949,9 @@ function Structures.buildObject(S, map, region, cluster,
     end
   end
   for _, c in ipairs(comps) do
-    c.z0 = cluster.minY * 8 + math.floor(c.lowY / 8) * 8
-           + (support and 8 or 0) + (8 - depth) / 2
+    c.z0 = supportRow and (supportRow * 8 + (8 - depth) / 2)
+           or (cluster.minY * 8 + math.floor(c.lowY / 8) * 8
+               + (support and 8 or 0) + (8 - depth) / 2)
     c.z1 = c.z0 + depth
   end
 
@@ -3051,6 +3244,80 @@ local function maskPlate(quads, m, perRow, atlasW, atlasH, x0, r, y, z0, D)
   end
 end
 
+-- An AUTHORED solid standing on furniture, given as plan layers instead of
+-- extruded from the drawing (see TileShape's `model`).  The one thing it
+-- shares with the mask paths is that nothing here is a colour: each layer
+-- names the atlas texels its top and its sides wear, and every quad below
+-- samples one of them, so the Centers' bell is painted out of the counter's
+-- own pixels and recolours with it.
+--
+-- Placement is by CELL, not by drawn row.  A model exists because the
+-- drawing was too small to un-project, so its drawn row says nothing about
+-- depth worth keeping -- what says something is which piece of furniture it
+-- is on and which end of it a person reaches: the solid is centred on the
+-- mask's own columns and pushed to the SOUTH edge of the support cell, the
+-- face the aisle is on, less the entry's `inset` -- the one number here
+-- taste can move, because flush against the counter's own front lip is a
+-- real position and so is a couple of voxels back from it.
+local function maskModel(quads, m, perRow, atlasW, atlasH, xMid, zSouth, y0)
+  local function uvOf(t)
+    local tile, row, col = t[1], t[2], t[3] or 0
+    return ((tile % perRow) * 8 + col + 0.5) / atlasW,
+           (math.floor(tile / perRow) * 8 + row + 0.5) / atlasH
+  end
+
+  for k, L in ipairs(m) do
+    local u, v = uvOf(L.side)
+    local ut, vt = uvOf(L.top)
+    local above = m[k + 1]
+    local x0 = xMid - math.floor(L.w / 2)
+    local z0 = zSouth - L.d
+    local function solid(layer, dx, dz)
+      if not layer or dx < 0 or dx >= layer.w or dz < 0 or dz >= layer.d then
+        return false
+      end
+      return layer.cells[dz * layer.w + dx] or false
+    end
+    for dz = 0, L.d - 1 do
+      for dx = 0, L.w - 1 do
+        if solid(L, dx, dz) then
+          local x, y, z = x0 + dx, y0 + k - 1, z0 + dz
+          local function quad(c1, c2, c3, c4, uu, vv, shade)
+            quads[#quads + 1] = { c1, c2, c3, c4, u = uu, v = vv,
+                                  shade = shade }
+          end
+          -- a layer's own plan is what closes it: a face is drawn wherever
+          -- the neighbouring cell of this layer is empty, and the top
+          -- wherever the layer ABOVE does not stand on it.  Nothing needs a
+          -- bottom -- layer 1 rests on the furniture and the rest rest on
+          -- each other.
+          if not solid(above, dx, dz) then
+            quad({ x, y + 1, z }, { x + 1, y + 1, z }, { x + 1, y + 1, z + 1 },
+                 { x, y + 1, z + 1 }, ut, vt, OBJ_SHADE.top)
+          end
+          if not solid(L, dx, dz + 1) then
+            quad({ x, y, z + 1 }, { x + 1, y, z + 1 },
+                 { x + 1, y + 1, z + 1 }, { x, y + 1, z + 1 }, u, v,
+                 OBJ_SHADE.front)
+          end
+          if not solid(L, dx, dz - 1) then
+            quad({ x + 1, y, z }, { x, y, z }, { x, y + 1, z },
+                 { x + 1, y + 1, z }, u, v, OBJ_SHADE.back)
+          end
+          if not solid(L, dx - 1, dz) then
+            quad({ x, y, z }, { x, y, z + 1 }, { x, y + 1, z + 1 },
+                 { x, y + 1, z }, u, v, OBJ_SHADE.side)
+          end
+          if not solid(L, dx + 1, dz) then
+            quad({ x + 1, y, z + 1 }, { x + 1, y, z }, { x + 1, y + 1, z },
+                 { x + 1, y + 1, z + 1 }, u, v, OBJ_SHADE.side)
+          end
+        end
+      end
+    end
+  end
+end
+
 -- ---- figures: a thing drawn INTO furniture, cut out and stood up ----
 
 -- One authored figure at one matched position.
@@ -3133,7 +3400,20 @@ local function buildFigure(S, map, fig, tx, ty, perRow)
   local atlasW = map.tileset.imageWidth or 128
   local atlasH = map.tileset.imageHeight or 48
 
-  if fig.depth then
+  if fig.model then
+    -- An authored solid: centred on the mask's own columns, standing on
+    -- the furniture's top plane at the front of its cell.
+    local maxX = minX
+    for ly = 0, bh - 1 do
+      for lx = 0, bw - 1 do
+        if at(lx, ly) and lx > maxX then maxX = lx end
+      end
+    end
+    local xMid = tx * 8 + math.floor((minX + maxX + 1) / 2)
+    local zSouth = (math.floor((ty + fig.h - 1) / 2) + 1) * 16 - (fig.inset or 0)
+    maskModel(S.objectQuads, fig.model, perRow, atlasW, atlasH,
+              xMid, zSouth, baseY)
+  elseif fig.depth then
     -- An OBJECT: the standee slab, standing on the FRONT edge of the tile
     -- row its feet are drawn in -- the south face of the 8px band a
     -- character card would have pivoted in.  It is anchored there and

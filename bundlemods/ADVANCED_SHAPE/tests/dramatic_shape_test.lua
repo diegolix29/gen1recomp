@@ -3108,25 +3108,20 @@ T.eq(Battles.flashing({ fx = { flash = 16 }, frame = 2 }), false,
 T.eq(Battles.flashing({ fx = { flash = 16 }, frame = 5 }), true,
   "on a four-frame cycle")
 
--- ------- the wireframe is forced on in a battle
+-- ------- the wireframe follows the V-GRID row, battles included
 --
--- A fight is a staged shot rather than the world being walked through, so it
--- always wears the seams. The player's own V-GRID row must not be touched by
--- that -- an override, not a write, or switching the mode off mid-battle
--- would quietly rewrite a setting they chose.
+-- The row is the whole answer. A battle used to force the seams on whatever
+-- it said -- so nothing may override enabled(), and the battle pass must not
+-- write the row either: a fight that flipped it would rewrite a setting the
+-- player chose.
 local Grid = run.loader.exports.DRAMATIC_SHAPE.lib.require("VoxelGrid")
-Grid.override = nil
-local rowWas = Grid.setting:get()
-T.eq(Grid.enabled(), rowWas and true or false,
-  "with no override the wireframe follows the row")
-Grid.override = true
-T.eq(Grid.enabled(), true, "an override forces it on")
-T.eq(Grid.setting:get(), rowWas, "and leaves the player's row alone")
-Grid.override = false
-T.eq(Grid.enabled(), false, "an override can force it off too")
-Grid.override = nil
-T.eq(Grid.enabled(), rowWas and true or false,
-  "and clearing it hands the answer back to the row")
+local idxWas = Grid.setting.index
+Grid.setting:sync(true)
+T.eq(Grid.enabled(), true, "the wireframe is on when the row is on")
+Grid.setting:sync(false)
+T.eq(Grid.enabled(), false, "and off when the row is off -- nothing overrides it")
+T.eq(Grid.override, nil, "and there is no override left to force a battle on")
+Grid.setting.index = idxWas
 
 -- ------- the depth of field is measured off the two marks
 --
@@ -6040,6 +6035,701 @@ end
 T.eq(Pack.load(126).staticPose, false,
   "Magmar animates -- its hermite animations decode correctly now")
 T.eq(pikachu.staticPose, false, "and a packed-stream species does too")
+end)()
+
+-- ------- RENDER DIST: the orbit rungs cut to the window that frames them
+--
+-- The flat screen's answer to the same question the headset's diorama box
+-- asks. Two halves, and this asserts both: the CUT the shader takes (a
+-- rectangle, because a window is not square), and the SKIP it buys -- a
+-- connected map lying entirely outside the box is never submitted.
+;(function()
+
+local lib = run.loader.exports.DRAMATIC_SHAPE.lib
+local VB = lib.require("ViewBox")
+local Dio = lib.require("Diorama")
+local VS = lib.require("VoxelState")
+local Curve = lib.require("WorldCurve")
+local boxWas, curveWas = VB.setting:get(), Curve.setting:get()
+local angleWas = VS.angle
+Curve.setting:sync(0)
+
+-- ------- the ladder
+T.eq(VB.setting.values[1], 0,
+  "FIT is rung 0, so an unset save lands on the cut rather than off it")
+T.eq(VB.setting.labels[1], "FIT", "and FIT is what the row calls it")
+T.eq(VB.setting.labels[#VB.setting.labels], "OFF",
+  "OFF is the TOP of the ladder -- 'how much world' ending in all of it, "
+  .. "rather than a switch beside the sizes")
+for i = 2, #VB.FRACS - 1 do
+  T.check(VB.FRACS[i] > VB.FRACS[i - 1],
+    "the ladder opens out at rung " .. (i - 1))
+end
+T.eq(VB.FRACS[1], 1.0,
+  "and FIT is exactly one window: the cut is the framing the flat game "
+  .. "already had, not one this file made up")
+
+-- ------- which rungs it is about
+VB.setting:sync(0)
+T.eq(VB.appliesTo(0), false, "OFF has no 3D pass to cut")
+T.check(VB.appliesTo(VS.FULL_LEVEL), "FULL is cut -- it IS the model read")
+T.check(VB.appliesTo(2) and VB.appliesTo(3) and VB.appliesTo(4)
+        and VB.appliesTo(5),
+  "and so is every orbit rung: 15, 35, 50 and 75")
+T.eq(VB.appliesTo(VS.FP_LEVEL), false,
+  "1ST is not: the player is standing IN the world, and a box round a "
+  .. "walking eye is a fog-of-war circle rather than a model on a table")
+T.eq(VB.appliesTo(VS.TP_LEVEL), false, "nor 3RD, which is the same rig")
+
+-- ------- the footprint IS NOT the window
+--
+-- The bug this replaced: the box was the flat game's own vw-by-vh
+-- rectangle, which is the ground a camera frames at 0 degrees and at no
+-- rung the mode actually has. Every tilted rung frames a TRAPEZOID that
+-- reaches further north and flares wider out there, and a window-sized box
+-- cut the top and both sides off a world plainly on screen -- gaps, with
+-- sky showing through them.
+--
+-- So the footprint is checked against a RAY CAST through the orbit's own
+-- basis: the frame's corner rays dropped on the ground plane. If the closed
+-- form and the rays ever disagree, the picture has a hole in it.
+local REACH = VB.MAX_REACH * 288
+local function castFootprint(a)
+  local tanY = 1 / (2 * VS.FOCAL)
+  local tanX = tanY * (320 / 288)
+  local k = VS.FOCAL * 288
+  local ca, sa = math.cos(a), math.sin(a)
+  local n, s, x = -1e18, -1e18, 0
+  for i = 0, 200 do
+    local sy = -1 + 2 * i / 200
+    -- forward (0,-ca,-sa), true up (0,sa,-ca), right (1,0,0)
+    local dy = -ca + sy * tanY * sa
+    local dz = -sa - sy * tanY * ca
+    if dy < -1e-9 then
+      local t = (k * ca) / -dy                 -- eye height over the drop
+      local wz, wx = k * sa + t * dz, t * tanX
+      if -wz > n then n = -wz end
+      if wz > s then s = wz end
+      if wx > x then x = wx end
+    end
+  end
+  return n, s, x
+end
+for _, deg in ipairs({ 0, 15, 35, 50 }) do
+  local n, s, x = castFootprint(math.rad(deg))
+  local fn, fs, fx = VB.footprint(math.rad(deg), 320, 288, REACH)
+  T.check(math.abs(fn - n) < 1 and math.abs(fs - s) < 1
+          and math.abs(fx - x) < 1,
+    ("%d degrees: the footprint is the ground the rays actually land on "
+     .. "(north %.0f/%.0f, south %.0f/%.0f, side %.0f/%.0f)")
+      :format(deg, fn, n, fs, s, fx, x))
+end
+-- straight down is the ONE case the old window-sized box got right, which
+-- is why it survived being wrong everywhere else
+do
+  local n, s, x = VB.footprint(0, 320, 288, REACH)
+  T.check(math.abs(n - 144) < 1e-6 and math.abs(s - 144) < 1e-6
+          and math.abs(x - 160) < 1e-6,
+    "at 0 degrees it reduces to the flat window, exactly")
+end
+-- and the shape of the error the gaps were: north grows with the tilt,
+-- south SHRINKS (the bottom of the frame is nearer than the focus), and
+-- the sides flare with the far field
+do
+  local n15, s15, x15 = VB.footprint(math.rad(15), 320, 288, REACH)
+  local n50, s50, x50 = VB.footprint(math.rad(50), 320, 288, REACH)
+  T.check(n15 > 144 and n50 > n15,
+    "every tilted rung reaches further north than the window did -- which "
+    .. "is the gap that used to open along the top")
+  T.check(s15 < 144,
+    "and less far south, because the bottom of the frame is nearer the eye "
+    .. "than the focus is")
+  T.check(x15 > 160 and x50 > x15,
+    "and wider at the sides, because the far field is further away -- the "
+    .. "other gap")
+  T.check(s50 < n50 * 0.5,
+    "so the picture is mostly AHEAD of the view centre, and the box has to "
+    .. "sit north of it rather than around it")
+end
+-- past atan(2*FOCAL) -- about 63 degrees -- the horizon is inside the frame
+-- and the honest answer is infinite. That is the whole reason there is a
+-- row: something has to name a distance.
+do
+  local n75 = VB.footprint(math.rad(75), 320, 288, REACH)
+  T.check(math.abs(n75 - REACH) < 1,
+    "at 75 the footprint is unbounded and the reach stands in for it")
+  local near = VB.footprint(math.rad(75), 320, 288, REACH / 2)
+  T.check(near < n75, "and a shorter reach brings the world's edge in")
+end
+
+-- ------- the cut itself
+VS.angle = math.rad(35)
+local box = VB.frame(100, 200, 320, 288, 3)
+T.eq(box.kind, Dio.BOX, "the cut is the shader's BOX kind, like the diorama's")
+T.eq(box.x, 100, "centred on the view in x, which the trapezoid is")
+T.check(box.z < 200,
+  "and NORTH of it in z, which the trapezoid also is -- a box centred on "
+  .. "the view centre is the bug that cut the top off")
+do
+  local n, s, x = VB.footprint(math.rad(35), 320, 288, REACH)
+  -- the south edge is the ground the bottom ray lands on PLUS what stands
+  -- there: a tree's feet are south of the row its top is seen on, and the
+  -- cut is by column (see lift)
+  s = s + VB.lift(math.rad(35)) + VB.SOUTH_PAD
+  T.check(math.abs(box.rz - (n + s) * 0.5) < 1e-6,
+    "the half-depth spans the footprint from its south edge to its north")
+  T.check(math.abs(box.z - (200 - (n - s) * 0.5)) < 1e-6,
+    "and the centre sits exactly between them")
+  T.check(math.abs(box.rx - x) < 1e-6, "with the far field's own half-width")
+  T.check(box.rz > 144 and box.rx > 160,
+    "both bigger than the window at every tilted rung, so the cut can "
+    .. "never take a bite out of the picture")
+end
+
+-- ------- and the geometry standing on the ground it frames
+--
+-- The bug: the box was cut to where the frame's rays hit the GROUND, and
+-- the ground is not what the picture is made of. At every rung past the
+-- frame's own half-angle the bottom of the screen shows things whose FEET
+-- are south of that line, and the shader cuts by column -- so a tree one
+-- pixel outside lost its whole height and the bottom of the frame wore a
+-- bite out of the scenery, the ground behind showing through.
+do
+  local tanY = 1 / (2 * VS.FOCAL)
+  T.eq(VB.lift(0), 0,
+    "straight down nothing is lost: a raised point lands NORTH of where its "
+    .. "own ray hits the ground, which no cut can take")
+  T.eq(VB.lift(math.atan(tanY)), 0,
+    "and up to atan(tanY) -- the frame's own half-angle -- it still is")
+  T.check(VB.lift(math.rad(35)) > 0 and VB.lift(math.rad(50)) > VB.lift(math.rad(35))
+          and VB.lift(math.rad(75)) > VB.lift(math.rad(50)),
+    "past it the lift opens with the tilt: the flatter the eye, the more of "
+    .. "a tree is what sits under the bottom of the frame")
+  -- against the ray it is derived from: a point HEIGHT up on the bottom
+  -- edge's own ray, dropped to the ground, is exactly this far south of
+  -- where that ray lands
+  for _, deg in ipairs({ 35, 50, 75 }) do
+    local a = math.rad(deg)
+    local dy = -(math.cos(a) + tanY * math.sin(a))
+    local dz = -(math.sin(a) - tanY * math.cos(a))
+    T.check(math.abs(VB.lift(a) - VB.HEIGHT * (-dz / -dy)) < 1e-9,
+      ("%d degrees: the lift is that ray walked back up by HEIGHT")
+        :format(deg))
+  end
+  -- and it is in the CUT, at FIT, which is the rung the artefact was seen on
+  VS.angle = math.rad(35)
+  local fit = VB.frame(0, 0, 320, 288, 3)
+  local n, s = VB.footprint(math.rad(35), 320, 288, REACH)
+  T.check(fit.z + fit.rz >= s + VB.lift(math.rad(35)) - 1e-6,
+    "so the box's south edge clears the feet of everything the bottom of "
+    .. "the frame can show, tree tops included")
+  T.check(fit.z + fit.rz > s and fit.z - fit.rz < -n + 1e-6,
+    "without moving the north edge, which the reach already decides")
+end
+VS.angle = math.rad(35)
+box = VB.frame(100, 200, 320, 288, 3)
+T.check(box.rx ~= box.rz,
+  "which is the whole reason the box kind carries two half-extents: a "
+  .. "square cut on a wide frame either loses the sides or overshoots")
+T.check(1 / box.invFade <= 0.5,
+  "with a HARD edge while the world is flat: that IS the sides")
+-- and the diorama's own box still passes the same number twice, so one
+-- shader branch serves both
+local sq = Dio.viewport(0, 0, 288)
+T.eq(sq.rx, sq.r, "a headset's box is square in x")
+T.eq(sq.rz, sq.r, "and in z -- no window to be shaped like")
+
+-- the row opens it out, and OFF stops cutting entirely
+VB.setting:sync(1)
+local wide = VB.frame(100, 200, 320, 288, 3)
+T.check(wide.rx > box.rx and wide.rz > box.rz,
+  "a wider rung reaches further in both directions")
+VB.setting:sync(#VB.setting.values - 1)
+T.eq(VB.setting:get(), 4, "the top rung is OFF")
+T.eq(VB.frame(100, 200, 320, 288, 3), nil, "and OFF cuts nothing at all")
+T.eq(VB.cull, nil, "leaving no viewport on the module for a pass to inherit")
+
+-- a bent world has no straight sides, so the rim dissolves under V-CURVE --
+-- the same call Diorama.fadeFor makes for the same reason
+VB.setting:sync(0)
+Curve.setting:sync(3)
+local bent = VB.frame(0, 0, 320, 288, 3)
+T.check(1 / bent.invFade > 1,
+  "V-CURVE softens the box's rim: a hard edge across a bent world is a "
+  .. "lie about what is being looked at")
+Curve.setting:sync(0)
+
+-- ------- the coarse half: whole maps skipped before they are drawn
+VB.setting:sync(0)
+VS.angle = math.rad(35)
+local cut = VB.frame(0, 0, 320, 288, 3)
+-- a 10x9-block map (Pallet's shape) at the origin is under the box
+local here = { map = { def = { width = 10, height = 9 } }, ox = 0, oy = 0 }
+T.check(VB.showsMap(here), "the map under the box is drawn")
+-- the same map pushed a long way north-east cannot reach the picture
+local far = { map = { def = { width = 10, height = 9 } },
+              ox = 4000, oy = 4000 }
+T.eq(VB.showsMap(far), false,
+  "a connected map entirely outside the box is skipped -- no terrain, no "
+  .. "water, no grass, no flowers and no shadow pass")
+-- the test is taken against the CUT's own edge, which is the trapezoid's
+-- and not the window's -- the border ring is meshed outside a map's own
+-- rectangle, so a map that stops just short still has trees in frame
+T.check(VB.showsMap({ map = { def = { width = 1, height = 1 } },
+                      ox = cut.x + cut.rx + VB.PAD - 8, oy = cut.z }),
+  "a map just outside the edge is kept for its border ring, which is "
+  .. "meshed beyond its own rectangle")
+T.eq(VB.showsMap({ map = { def = { width = 1, height = 1 } },
+                   ox = cut.x + cut.rx + VB.PAD + 64, oy = cut.z }), false,
+  "and dropped once even the ring cannot reach")
+-- and the skip follows the trapezoid north: a map the OLD window-sized box
+-- would have thrown away is still on screen at a tilted rung
+T.check(VB.showsMap({ map = { def = { width = 4, height = 4 } },
+                      ox = -64, oy = -200 }),
+  "a map north of the view centre, past where a window-sized box ended, "
+  .. "is kept -- the camera is looking straight at it")
+VB.stop()
+T.check(VB.showsMap(far),
+  "with no box open every map is drawn, so a caller may guard "
+  .. "unconditionally -- which is every headset frame and every OFF rung")
+T.check(VB.showsMap(nil), "and a malformed neighbour is never skipped")
+
+-- ------- the sun has to notice the row
+--
+-- WHICH neighbours went into the shadow map is now a function of the box,
+-- and the box is the one input the sun's signature did not already carry.
+VB.setting:sync(0)
+local sigFit = VB.signature()
+VB.setting:sync(2)
+T.neq(VB.signature(), sigFit,
+  "opening the row out changes the sun's signature, so a map recorded "
+  .. "without a neighbour is redrawn with it")
+
+Curve.setting:sync(curveWas)
+VB.setting:sync(boxWas)
+VS.angle = angleWas
+end)()
+
+-- ------- LET'S GO: the capture mode's arithmetic and the ball's pose
+--
+-- The throw itself is a rendered, pointer-driven thing the suite cannot
+-- fly, but everything consequential under it is plain arithmetic and runs
+-- headless: the scaled experience formula (checked against the published
+-- Let's Go table), the combo ladder, and the Pokeball prop's state
+-- machine, which must load and animate without a GPU.
+;(function()
+  local lib = run.loader.exports.DRAMATIC_SHAPE.lib
+  local LetsGo = lib.require("LetsGo")
+  local Pokeball = lib.require("Pokeball")
+  local Mat4 = lib.require("Mat4")
+
+  -- the reference points from the community-measured table: a Lv30
+  -- Chansey (base exp 395) pays 2371 to a Lv30 receiver and 5497 to a
+  -- Lv10 one, before any catch bonuses
+  T.eq(LetsGo._scaledGain({ defeatedDef = { baseExp = 395 }, level = 30,
+                            mon = { level = 30 } }, 1), 2371,
+    "the scaled formula at equal levels is b*L/5 + 1 -- the table's 2371")
+  T.eq(LetsGo._scaledGain({ defeatedDef = { baseExp = 395 }, level = 30,
+                            mon = { level = 10 } }, 1), 5497,
+    "and a Lv10 receiver pulls the table's 5497 from the same catch -- "
+    .. "the receiver's own level is in the denominator")
+  T.check(LetsGo._scaledGain({ defeatedDef = { baseExp = 40 }, level = 3,
+                               mon = { level = 100 } }, 1) >= 1,
+    "a trivial catch still pays at least one point")
+
+  -- ------- the capture seat speaks the pull's own language
+  --
+  -- The seat hands BattleScene a pitch, and the only thing downstream reads
+  -- it is the camera-ward pull the grass and flowers are drawn with. That
+  -- angle is measured off STRAIGHT DOWN -- Voxel.angle's convention, and
+  -- BattleCam.rig's -- and this rig used to answer the DEPRESSION below
+  -- level instead, which is its complement. A seat looking nearly level
+  -- therefore read as "straight down", the end of the ladder where the pull
+  -- is at its longest: 46 world pixels of bias handed to a camera standing
+  -- 46 world pixels behind the player. The pull is a shove along each
+  -- vertex's own eye ray, so at that range it carried the grass at the eye
+  -- THROUGH the lens, and a tuft landed smeared across the top of the frame.
+  do
+    local CatchThrow = lib.require("CatchThrow")
+    local BattleCam = lib.require("BattleCam")
+    local VoxelScene = lib.require("VoxelScene")
+    -- two mons two cells apart, the arena laid down unturned
+    local arena = { player = { 100, 200 }, enemy = { 100, 168 },
+                    mid = { 100, 184 }, turn = 0 }
+    local seat, pitch = CatchThrow._rig(arena, 0)
+    T.check(pitch > math.rad(75),
+      ("the capture seat reads as NEARLY LEVEL (%.1f degrees off straight "
+       .. "down), which is what it is"):format(math.deg(pitch)))
+    local _, camPitch = BattleCam.rig(arena, 0, true)
+    T.check(camPitch > math.rad(45) and pitch > math.rad(45),
+      "in the same convention the battle's own rig hands back, so one pull "
+      .. "formula can serve both seats")
+    -- the invariant the bug broke: a bias along the eye ray must never
+    -- reach the eye, or the vertex comes out behind the lens
+    local dx, dz = seat.eye[1] - arena.player[1], seat.eye[3] - arena.player[2]
+    local range = math.sqrt(dx * dx + dz * dz)
+    T.check(VoxelScene.pull(math.max(pitch, 0.05)) < range * 0.5,
+      ("the grass pull (%.1f px) stays well inside the seat's own range to "
+       .. "the player's cell (%.1f px) -- the tufts it is biasing are the "
+       .. "ones standing right there")
+        :format(VoxelScene.pull(math.max(pitch, 0.05)), range))
+  end
+
+  -- and the same formula pays TRAINER knockouts under FULL, with the
+  -- wild/trainer 1.5 that a catch never sees (a caught Pokemon is always
+  -- wild, which is why the catch numbers above are untouched by it)
+  local wildKO = LetsGo._scaledGain({ defeatedDef = { baseExp = 395 },
+                                      level = 30, mon = { level = 30 } }, 1)
+  local trainerKO = LetsGo._scaledGain({ defeatedDef = { baseExp = 395 },
+                                         level = 30, mon = { level = 30 },
+                                         isTrainer = true }, 1)
+  T.eq(wildKO, 2371, "a wild payout is unchanged by the trainer term")
+  T.eq(trainerKO, 3556, "a trainer's Pokemon pays the same formula at 1.5")
+  T.check(trainerKO > wildKO, "which is more than the same wild one")
+  -- the receiver's own level still drives it, which is the whole point of
+  -- sharing to the party: the low member gains multiples of the high one
+  local lowKO = LetsGo._scaledGain({ defeatedDef = { baseExp = 395 },
+                                     level = 30, mon = { level = 5 },
+                                     isTrainer = true }, 1)
+  T.check(lowKO > trainerKO * 2,
+    "a level 5 party member takes several times what a level 30 one does "
+    .. "from the very same knockout")
+
+  -- the combo ladder's five tiers
+  T.eq(LetsGo._comboMult(1), 1.1, "a fresh combo is the 1.1 tier")
+  T.eq(LetsGo._comboMult(10), 1.1, "which runs to ten")
+  T.eq(LetsGo._comboMult(11), 1.5, "eleven starts the 1.5 tier")
+  T.eq(LetsGo._comboMult(21), 2.0, "twenty-one the 2.0")
+  T.eq(LetsGo._comboMult(31), 2.5, "thirty-one the 2.5")
+  T.eq(LetsGo._comboMult(41), 3.0, "and forty-one caps it at 3.0")
+  T.eq(LetsGo._comboMult(999), 3.0, "where it stays")
+
+  -- the row answers the mode, and OFF answers false
+  T.eq(LetsGo.mode(), false, "LET'S GO defaults to OFF")
+
+  -- The capture's buttons are read on the LOGIC STEP, through the engine's
+  -- input.step seam, because edges do not survive the render clock (see
+  -- CatchThrow.buttons). The hook calls it under pcall, so a rename would
+  -- be swallowed silently and B would simply stop working -- which is
+  -- exactly the failure it was written to fix. Assert the name exists, and
+  -- that it is harmless with no session, since it runs every single step.
+  do
+    local CatchThrow = lib.require("CatchThrow")
+    T.eq(type(CatchThrow.buttons), "function",
+      "the capture reads its buttons on the logic step, by name")
+    local q = { "a", "b" }
+    CatchThrow.buttons({ input = { pressQueue = q } })
+    T.eq(#q, 2, "and with no session in flight it takes nothing and does nothing")
+  end
+
+  -- ------- the scripted catch tutorials are none of LET'S GO's business
+  --
+  -- The VIRIDIAN CITY old man and Yellow's PROF.OAK / PIKACHU intro are
+  -- the same makeOldManDemo cutscene: the cursor, the bag and the throw
+  -- are all scripted, and nobody keeps the Pokemon. Every rung has to
+  -- leave them exactly as the engine plays them.
+  T.eq(LetsGo.scripted({ demo = true }), true,
+    "the old man's tutorial is a scripted battle")
+  T.eq(LetsGo.scripted({ demo = true, oakDemo = true }), true,
+    "and so is PROF.OAK catching the PIKACHU")
+  T.eq(LetsGo.scripted({ kind = "wild" }), false,
+    "an ordinary wild encounter is not")
+  T.eq(LetsGo.scripted(nil), false, "and no battle at all is not either")
+  do
+    -- the predicates that gate every FULL behaviour, read at FULL
+    local realMode = LetsGo.mode
+    LetsGo.mode = function() return "full" end
+    T.eq(LetsGo.fullWild({ kind = "wild" }), true,
+      "FULL owns an ordinary wild encounter")
+    T.eq(LetsGo.fullWild({ kind = "wild", demo = true }), false,
+      "but never the old man's demo, whatever the row says")
+    T.eq(LetsGo.fullWild({ kind = "wild", oakDemo = true }), false,
+      "nor PROF.OAK's")
+    T.eq(LetsGo.wantsMinigame({ kind = "wild", demo = true }), false,
+      "and a scripted throw is never handed the minigame")
+    LetsGo.mode = realMode
+  end
+
+  -- the ball: a full open-drop-rock-click life without a GPU
+  T.eq(Mat4.rotateZ ~= nil, true, "Mat4 grew the roll the wobble rocks on")
+  do
+    local m = Mat4.rotateZ(math.pi / 2)
+    -- row-major: x' of (1,0,0) is m[1], y' is m[5]
+    T.check(math.abs(m[1]) < 1e-9 and math.abs(m[5] - 1) < 1e-9,
+      "rotateZ carries +X onto +Y, the right-handed roll")
+  end
+  local ball = Pokeball.new("GREAT_BALL")
+  T.eq(ball.lid, 0, "a fresh ball is shut")
+  ball:open()
+  for _ = 1, 60 do ball:update(1 / 60) end
+  T.eq(ball.lid, 1, "open() hinges the lid fully over its ramp")
+  T.check(ball.glow < 1, "and the mouth glow decays on its own")
+  ball:close()
+  for _ = 1, 60 do ball:update(1 / 60) end
+  T.eq(ball.lid, 0, "close() brings it back")
+  local dur = ball:rock(1)
+  T.check(dur > 0, "a rock reports its duration for the caller's cadence")
+  T.check(ball:busy(), "and the ball is busy while it rocks")
+  for _ = 1, math.ceil(dur * 60) + 2 do ball:update(1 / 60) end
+  T.check(not ball:busy(), "then settles")
+  ball:catchClick()
+  T.check(ball.stars ~= nil, "the caught click spawns its stars")
+  local matrix = ball:matrix()
+  T.eq(#matrix, 16, "the pose is one model matrix")
+  for _ = 1, 120 do ball:update(1 / 60) end
+  T.check(ball.stars == nil, "and the stars burn out on their own")
+end)()
+
+-- ------- an interior wall caps with its own plain course
+--
+-- A wall band is 16px of art over a run two drawn rows deep, so it folds
+-- ENTIRELY onto its south face and has no drawn row left to lay flat on
+-- top. The top therefore repeated the face: the town house's town-map
+-- poster and window, and the Pokemon Center's pokeball poster, came out
+-- lying across the top of the wall as well as hanging on it -- a picture
+-- you look DOWN on from the voxel camera.
+--
+-- `wall_top` names the capping course per tileset (the plain panel the
+-- decorated column's own neighbours draw), and it is a fact about the
+-- drawing that no measurement of the geometry can recover -- nothing
+-- distinguishes "poster" from "panel" but knowing which is which.
+;(function()
+  local Mesher = run.loader.exports.DRAMATIC_SHAPE.lib.require("ChunkMesher")
+  local Struct = run.loader.exports.DRAMATIC_SHAPE.lib.require("Structures")
+  local Shape = run.loader.exports.DRAMATIC_SHAPE.lib.require("TileShape")
+
+  -- the blanket form: whatever a wall cell draws, it caps with the one
+  -- course the atlas's rooms are panelled in
+  T.eq(Shape.wallTop("HOUSE")(45), 0,
+    "the town house caps its walls with the blank course")
+  T.eq(Shape.wallTop("POKECENTER")(2), 40,
+    "and a Center with its striped panel -- the tile cell (9,0) draws")
+  T.eq(Shape.wallTop("REDS_HOUSE_2")(36), 0,
+    "Red's bedroom with its own blank panel, over the window")
+  T.eq(Shape.wallTop("REDS_HOUSE_1")(36), 0, "and so does the floor below")
+  -- the keyed form, for an atlas that dresses more than one kind of room
+  T.eq(Shape.wallTop("LOBBY")(40), 93,
+    "the Rocket lift's car door caps with the cabin frame")
+  T.eq(Shape.wallTop("LOBBY")(1), nil,
+    "but the department store's own panel is left exactly as it was -- "
+    .. "one atlas, several rooms, and only the lift is a lift")
+  T.eq(Shape.wallTop("DS_NO_SUCH_TILESET"), nil,
+    "a tileset that says nothing keeps the top it always had")
+
+  local FLOOR = 1
+  local function topTiles(tilesetId, rows)
+    local map = {
+      id = "DS_TEST_WALLTOP_" .. tilesetId,
+      tileset = { id = tilesetId, image = "gfx/tilesets/ds_test.png",
+                  tilesPerRow = 16, imageWidth = 128, imageHeight = 48,
+                  blocks = {}, grassTile = -1 },
+      def = { width = 4, height = 2, tileset = tilesetId },
+      walkable = { [FLOOR] = true },
+      waterTiles = {},
+      doorTiles = {},
+      tileAt = function(_, tx, ty)
+        local r = rows[ty + 1]
+        return (r and r[tx + 1]) or FLOOR
+      end,
+      cellTile = function(self, cx, cy) return self:tileAt(cx * 2, cy * 2 + 1) end,
+      isWaterCell = function() return false end,
+      isWalkableCell = function(self, cx, cy)
+        return self:cellTile(cx, cy) == FLOOR
+      end,
+      inBounds = function(_, cx, cy)
+        return cx >= 0 and cy >= 0 and cx < 4 and cy < 2
+      end,
+    }
+    Struct.invalidate(map.id)
+    local verts = Mesher.geometry(map, true, nil)
+    -- the flat quads standing at wall height, keyed by the column they cap
+    local out = {}
+    for i = 1, #verts, 4 do
+      local a, b, c, d = verts[i], verts[i + 1], verts[i + 2], verts[i + 3]
+      if a[2] == b[2] and b[2] == c[2] and c[2] == d[2] and a[2] == 16 then
+        local ax = math.floor(math.min(a[4], b[4], c[4], d[4]) * 128 + 0.5)
+        local ay = math.floor(math.min(a[5], b[5], c[5], d[5]) * 48 + 0.5)
+        local tx = math.floor(math.min(a[1], b[1], c[1], d[1]) / 8)
+        local ty = math.floor(math.min(a[3], b[3], c[3], d[3]) / 8)
+        -- keyed by the TILE ROW too: a wall band is two drawn rows deep
+        -- and they can wear different art
+        out[ty * 100 + tx] = out[ty * 100 + tx]
+                             or (math.floor(ay / 8) * 16 + math.floor(ax / 8))
+      end
+    end
+    return out, verts
+  end
+
+  -- BLUES_HOUSE's back wall: blank panel, the town-map poster (45/46 over
+  -- 61/62) at cell (3,0)'s block, the window (36 over 52) at (5,0)'s
+  local houseTops, houseVerts = topTiles("HOUSE", {
+    { 0, 0, 45, 46, 36, 36, 0, 0 },
+    { 0, 0, 61, 62, 52, 52, 0, 0 },
+  })
+  for ty = 0, 1 do
+    for tx = 0, 7 do
+      T.eq(houseTops[ty * 100 + tx], 0,
+        ("(%d,%d) of the house's back wall caps with the blank course")
+        :format(tx, ty))
+    end
+  end
+
+  -- and the FACE is untouched: the poster still hangs in the room, which is
+  -- the half of this the fix must not take with it
+  local hung = {}
+  for _, v in ipairs(houseVerts) do
+    hung[math.floor(math.floor(v[5] * 48 + 0.5) / 8) * 16
+         + math.floor(math.floor(v[4] * 128 + 0.5) / 8)] = true
+  end
+  T.check(hung[45] and hung[46] and hung[61] and hung[62],
+    "the town-map poster is still drawn on the wall it hangs on")
+  T.check(hung[36] and hung[52], "and so is the window")
+
+  -- VIRIDIAN_POKECENTER's back wall: the striped panel with the pokeball
+  -- poster (2/3 over 18/19) spanning cells (3,0) and (4,0)
+  local pcTops = topTiles("POKECENTER", {
+    { 40, 40, 40, 2, 3, 40, 40, 40 },
+    { 40, 40, 40, 18, 19, 40, 40, 40 },
+  })
+  for ty = 0, 1 do
+    for tx = 0, 7 do
+      T.eq(pcTops[ty * 100 + tx], 40,
+        ("(%d,%d) of the Center's back wall caps with the striped panel")
+        :format(tx, ty))
+    end
+  end
+
+  -- ------- the Rocket lift's car doors
+  --
+  -- Detected rather than pinned -- the doors are a volume Structures finds
+  -- -- so the cap has to reach the RUN branch too, not only the pinned one.
+  local liftTops = topTiles("LOBBY", {
+    { 92, 92, 92, 92, 92, 92, 92, 92 },
+    { 93, 93, 93, 93, 93, 93, 93, 93 },
+    {  1,  1, 40, 40, 40, 40,  1,  1 },
+    { 33, 33, 56, 56, 56, 56, 33, 33 },
+  })
+  -- rows 2 and 3 are the doors' own band; the doors span columns 2-5
+  for ty = 2, 3 do
+    for tx = 2, 5 do
+      T.eq(liftTops[ty * 100 + tx], 93,
+        ("(%d,%d) of the lift's door caps with the cabin frame"):format(tx, ty))
+    end
+  end
+  -- and the panelling either side of them is left alone, which is what the
+  -- keyed form buys: the same atlas panels the department store
+  T.eq(liftTops[2 * 100], 1, "the blank course beside the door is untouched")
+  T.eq(liftTops[3 * 100], 33, "and so is its skirting")
+end)()
+
+-- ------- Lance's room is furnished with the badge gyms' statue
+--
+-- The same drawing on a different atlas: one cell of bird over one cell of
+-- plinth. Left derived the pair merged into one 32px volume wearing the
+-- statue folded onto its face -- the extruded picture. The gyms' reading
+-- (solid plinth, per-pixel standee on top) is the right one here too, and
+-- these eight tiles draw nothing else anywhere in the game.
+;(function()
+  local Shape = run.loader.exports.DRAMATIC_SHAPE.lib.require("TileShape")
+  local shapes = Shape.forMap({
+    tileset = { id = "DOJO", tilesPerRow = 16,
+                imageWidth = 128, imageHeight = 48, grassTile = -1 },
+    walkable = { [17] = true },
+  })
+  for _, t in ipairs({ 2, 18, 19, 56 }) do
+    T.eq(shapes[t].class, "prop",
+      ("the statue's figure tile %d stands as a per-pixel cutout"):format(t))
+    T.eq(shapes[t].authored, true, "and it is an authored answer, not derived")
+  end
+  for _, t in ipairs({ 34, 35, 50, 51 }) do
+    T.eq(shapes[t].class, "wall",
+      ("the plinth tile %d stays a solid 16px block"):format(t))
+    T.eq(shapes[t].authored, true,
+      "authored, which is what the standee's support rule tests -- and "
+      .. "what keeps tile 50 ($32) out of the water-fallback trap")
+  end
+  T.eq(shapes[13].class, "bookcase",
+    "and Oak's shelf ranks on the same atlas are untouched")
+end)()
+
+-- ------- a wall cut into a terrace inherits TERRACE, never a statue
+--
+-- `bookcase_backfill = "above"` hands a vacated row the cell above the run,
+-- so masonry set into a hillside has more hillside behind it rather than a
+-- trench. Indigo Plateau's avenue statues stand directly on the pilasters
+-- that collapse this way, so what every one of them inherited was the BIRD:
+-- the figure's shape and art copied onto two more rows down the shaft, and
+-- the statue came out two deep behind itself. A standee above is an object
+-- standing ON the terrace, not terrace -- so there is nothing to inherit.
+;(function()
+  local Struct = run.loader.exports.DRAMATIC_SHAPE.lib.require("Structures")
+  -- the real west-edge statue of INDIGO_PLATEAU, tile for tile: the bird
+  -- (37/38 over 40/41) on the pilaster (cap 21/22, shaft 5/6 twice, foot
+  -- 21/22), standing on the plateau's paving (35)
+  local rows = {
+    { 46, 47 }, { 46, 47 },
+    { 37, 38 }, { 40, 41 },
+    { 21, 22 }, {  5,  6 },
+    {  5,  6 }, { 21, 22 },
+    { 35, 35 }, { 35, 35 },
+    { 35, 35 }, { 35, 35 },
+  }
+  local map = {
+    id = "DS_TEST_PLATEAU_STATUE",
+    tileset = { id = "PLATEAU", image = "gfx/tilesets/ds_test.png",
+                tilesPerRow = 16, imageWidth = 128, imageHeight = 40,
+                blocks = {}, grassTile = -1 },
+    def = { width = 1, height = 3, tileset = "PLATEAU" },
+    walkable = { [35] = true },
+    waterTiles = {},
+    doorTiles = {},
+    tileAt = function(_, tx, ty)
+      local r = rows[math.max(1, math.min(#rows, ty + 1))]
+      return r[(tx % 2) + 1]
+    end,
+    cellTile = function(self, cx, cy) return self:tileAt(cx * 2, cy * 2 + 1) end,
+    isWaterCell = function() return false end,
+    isWalkableCell = function(self, cx, cy)
+      return self:cellTile(cx, cy) == 35
+    end,
+    isDoorTileCell = function() return false end,
+    isGrassCell = function() return false end,
+    inBounds = function(_, cx, cy)
+      return cx >= 0 and cy >= 0 and cx < 2 and cy < 6
+    end,
+  }
+  Struct.invalidate(map.id)
+  local S = Struct.forMap(map)
+  local function keyOf(tx, ty) return (ty + 64) * 4096 + (tx + 64) end
+
+  -- the bird stands, once, where it is drawn
+  for _, ty in ipairs({ 2, 3 }) do
+    T.eq(S.shapeAt[keyOf(0, ty)].art, "billboard",
+      "the statue's own rows carry the standee")
+  end
+  -- and the pilaster rows it vacates carry NOTHING -- not a second bird
+  for _, ty in ipairs({ 4, 5, 6, 7 }) do
+    local s = S.shapeAt[keyOf(0, ty)]
+    T.check(s == nil or s.art ~= "billboard",
+      ("pilaster row %d did not inherit the statue standing on it"):format(ty))
+  end
+
+  -- ...and the bird stands on the box rather than where it is DRAWN. The
+  -- collapse walks the whole four-row pilaster onto its southmost cell, so
+  -- a standee that trusted its own drawn position ended up a full cell
+  -- north of the pillar holding it up -- at the right height, over open
+  -- ground. Every row of the rank records where the box actually went.
+  for _, ty in ipairs({ 4, 5, 6, 7 }) do
+    T.eq(S.bookcaseBox[keyOf(0, ty)], 6,
+      ("rank row %d knows the box stands on row 6"):format(ty))
+  end
+  local zlo = math.huge
+  for _, q in ipairs(S.objectQuads) do
+    for i = 1, 4 do zlo = math.min(zlo, q[i][3]) end
+  end
+  T.eq(math.floor(zlo / 8), 6,
+    "and the statue's own geometry starts on that row -- standing on the "
+    .. "pillar, not hanging in the air two cells in front of it")
 end)()
 
 Pipelines.reset()

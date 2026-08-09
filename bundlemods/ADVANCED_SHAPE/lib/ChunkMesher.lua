@@ -65,6 +65,26 @@ end
 
 local ChunkMesher = {}
 
+-- Which drawn row a FLAT-topped volume's top face wears at depth `ty`.
+--
+-- A structure is usually deeper than the art that draws it, so the rows
+-- cycle and the drawing repeats down the top. That is right for art which
+-- genuinely repeats -- the Safari Zone's fence alternates two tiles the
+-- whole way down -- and wrong for a RIM over a uniform body: a cliff
+-- mound's first row is its top edge, and cycling lays that edge again
+-- every second tile, striping a plateau with rims it should not have.
+--
+-- Where Structures found the body uniform, the rim is laid once at the
+-- north edge and the body held after it. Everything else cycles as before.
+function ChunkMesher.flatTopRow(run, ty)
+  local m = math.min(2, run.extent)
+  local d = ty - run.north
+  if run.topUniform then
+    return run.north + math.min(d, m - 1)
+  end
+  return run.north + (d % m)
+end
+
 -- Ring of border blocks meshed around the body, matching the width
 -- TileRenderer draws so the two modes end at the same place.
 local RING = 3
@@ -281,6 +301,19 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return tile
   end
 
+  -- The capping course an interior wall wears on its TOP face (see
+  -- TileShape.wallTop). A wall band folds entirely onto its own face, so
+  -- the top had nothing left to lay flat and repeated the face -- a house's
+  -- town-map poster and window, a Center's pokeball poster and the Rocket
+  -- lift's doors came out lying across the top of the wall as well as
+  -- standing in it. Only the top is redirected: the face still draws what
+  -- the map draws.
+  local wallTop = TileShape.wallTop(tileset.id)
+  local function capOf(s, tile)
+    if not (wallTop and s.class == "wall") then return nil end
+    return wallTop(tile)
+  end
+
   -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
   local function uvRect(tile, vTop, vBot)
     local ax = (tile % perRow) * 8
@@ -403,8 +436,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
 
   -- `to` routes the quad somewhere other than the main sink -- the water
   -- surface is the only caller that ever does (see runGeometry's header).
-  local function topQuad(x0, z0, h, tile, shade, to)
-    local u0, u1, v0, v1 = uvRect(tile, 0, 8)
+  -- `vTop`/`vBot` crop the art to a row range of the tile, which only the
+  -- half-cell furniture rule below ever asks for: a top band that has to
+  -- cover more depth than it was drawn with hands each 8px cell its own
+  -- slice of the band instead of the whole of it.
+  local function topQuad(x0, z0, h, tile, shade, to, vTop, vBot)
+    local u0, u1, v0, v1 = uvRect(tile, vTop or 0, vBot or 8)
     ;(to or push)({ { x0, h, z0 }, { x0 + 8, h, z0 },
                     { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
                   { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
@@ -561,11 +598,16 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                  { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
                { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95)
         elseif run then
-          local m = math.min(2, run.extent)
-          local topTile = map:tileAt(tx, run.north + ((ty - run.north) % m))
+          local topTile = map:tileAt(tx, ChunkMesher.flatTopRow(run, ty))
+          -- a DETECTED wall volume caps the same way a pinned one does:
+          -- the Rocket lift's cabin doors are found rather than pinned,
+          -- and their drawing lay across the top of the wall they are set
+          -- into (see wallTop)
+          topTile = capOf(s, tile) or topTile
           topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE)
         else
           local topTile = tile
+          local vTop, vBot = nil, nil
           if s.art == "upright" and s.authored then
             -- Top art for a pinned box.  A furniture drawing is top-view
             -- rows over floor(h/8) face-on rows the fold stands upright;
@@ -592,6 +634,30 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               end
             end
             local row = math.min(ty, front - math.floor(h / 8))
+            -- HALF-CELL FURNITURE, one cell of plot: the drawing gives ONE
+            -- tile row of top view (the counter's surface) over one that
+            -- folds up as the face (its front panel), and the plot under it
+            -- is 16px deep.  Repeating the top row over both depth rows --
+            -- what `row` above resolves to, since the face row has no top
+            -- art of its own to wear -- draws the surface TWICE: the
+            -- Centers' counters ran a black back edge and its white
+            -- highlight down the middle of every counter, and the push bell
+            -- drawn on one of them came out as two bells stacked front to
+            -- back.  The band is foreshortened, not tiled, so each depth row
+            -- takes HALF of it and the one drawing covers the whole top.
+            --
+            -- Deliberately narrow: only a run that is exactly one cell deep
+            -- with exactly one top row.  A deeper run states its own depth
+            -- 1:1 already (the lounge couch is four tile rows over two
+            -- cells, and its cushions must stay cushion-sized), and only the
+            -- last of its rows repeats -- which is the drawing tiling, not
+            -- a surface drawn once and stretched.
+            local face = math.floor(h / 8)
+            if front - face - north == 0 and front - north == 1 then
+              local k = ty - north
+              row = north
+              vTop, vBot = k * 4, k * 4 + 4
+            end
             if row < north then
               -- the whole run folded onto the face: top with the drawn
               -- row just above it when that row is furniture too (a
@@ -601,7 +667,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               row = (above and above.authored and above.art == "upright")
                     and (north - 1) or north
             end
-            topTile = S.tileAt[keyOf(tx, row)]
+            topTile = capOf(s, tile) or S.tileAt[keyOf(tx, row)]
           end
           -- water's surface, and only water's: the recessed sheet itself,
           -- never the ground's shoreline bands around it. A cell an object
@@ -610,7 +676,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           -- on the pond.
           topQuad(x0, z0, h, topTile,
                   s.art == "upright" and VOLUME_TOP_SHADE or 1,
-                  (s.class == "water") and waterPush or nil)
+                  (s.class == "water") and waterPush or nil, vTop, vBot)
         end
 
         -- sides: 8px bands wherever the neighbour is lower. Band k spans
