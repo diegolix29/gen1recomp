@@ -156,18 +156,22 @@ local function allRequiredFilesExist(version)
   return ok
 end
 
--- A developer checkout / Python build leaves Red's generated data in the
--- physfs SOURCE at the un-prefixed root (the checked-out data/generated and
--- assets/generated); it is always current and never moves into red/.  Only
--- Red ships this way (Blue/Yellow are import-only).  The check goes through
--- love.filesystem directly so the red/ cache prefix cannot hide the source
--- tree, and the realDirectory test keeps a save-dir cache from counting.
-local function sourceTreeHasData()
+-- A developer checkout / Python build leaves generated data in the physfs
+-- source: Red at the historical root, Blue/Yellow in their versioned trees.
+-- Imported Red caches still live under red/.  Check source paths directly so
+-- that cache prefix cannot hide Red's source tree, and keep save-dir caches
+-- from counting as current source data.
+local function sourceTreeHasData(version)
   if not love.filesystem.getRealDirectory then return false end
+  local prefix = version == "red" and "" or GameVersion.cachePrefix(version)
   for _, path in ipairs(REQUIRED_FILES) do
-    if love.filesystem.getInfo(path, "file") == nil then return false end
+    if love.filesystem.getInfo(prefix .. path, "file") == nil then return false end
   end
-  local real = love.filesystem.getRealDirectory(REQUIRED_FILES[1])
+  for _, path in ipairs(VERSION_REQUIRED_FILES[version] or {}) do
+    if love.filesystem.getInfo(prefix .. path, "file") == nil then return false end
+  end
+  local path = prefix .. REQUIRED_FILES[1]
+  local real = love.filesystem.getRealDirectory(path)
   return real == love.filesystem.getSource()
 end
 
@@ -244,10 +248,8 @@ function RomImporter.isReady(version)
     -- save-directory copy that would otherwise shadow it at runtime.
     purgeSaveDirCache()
   end
-  -- Red generated data in the physfs source (developer checkout / Python
-  -- build) is always current; Blue is import-only and falls through to the
-  -- version-marker gate.
-  if version == "red" and sourceTreeHasData() then return true end
+  -- Generated data in a developer checkout / Python build is always current.
+  if sourceTreeHasData(version) then return true end
   local saved = CacheFs.prefix
   CacheFs.prefix = GameVersion.cachePrefix(version)
   local marker = CacheFs.read(MARKER_PATH)
@@ -1945,14 +1947,7 @@ function RomImporter:_pollPickedFiles(dt)
   if not found then
     for _, name in ipairs(love.filesystem.getDirectoryItems("")) do
       local n = name:lower()
-      -- picked_sky.png is NOT matched here: it has its own dedicated,
-      -- phase-aware handling below, gated on its own "sky:<phase>"
-      -- pickPending value. It used to be caught by this generic loop
-      -- too, which nil'd out pickPending and called focus(true) before
-      -- the sky-specific block a few lines down ever got a chance to
-      -- run -- so a sky image picked on Android was silently dropped on
-      -- the floor every single time; this is the fix for that.
-      if n:match("%.gbc?$") or n == "picked_mod.zip" or n == "picked_save.sav" then
+      if n:match("%.gbc?$") or n == "picked_mod.zip" or n == "picked_save.sav" or n == "picked_sky.png" then
         found = true
         break
       end
@@ -1962,23 +1957,20 @@ function RomImporter:_pollPickedFiles(dt)
     self.pickPending = nil
     self:focus(true)
   end
-
-  -- Check for a sky image pick. pickPending is "sky:<phase>" (see
-  -- _pickSkyImage), so this both detects the pick AND remembers which of
-  -- the four slots it belongs in.
-  local skyPhase = self.pickPending and self.pickPending:match("^sky:(.+)$")
-  if self.pickPending == "sky" then skyPhase = "day" end -- pre-4-slot pending, if one was ever left on disk
-  if skyPhase and love.filesystem.getInfo("picked_sky.png", "file") then
+  
+  -- Check for sky image pick
+  if self.pickPending == "sky" and love.filesystem.getInfo("picked_sky.png", "file") then
     self.pickPending = nil
     local SaveData = require("src.core.SaveData")
-    local Tilt = require("src.render.Tilt")
-    if Tilt:adoptSkyImageFile(skyPhase, "picked_sky.png") then
+    local opts = SaveData.loadOptions()
+    if opts then
+      opts.skyImageEnabled = true
+      SaveData.saveOptions(opts)
+      local Tilt = require("src.render.Tilt")
+      Tilt:setSkyImage("picked_sky.png")
+      -- Rename to the standard sky_image.png for consistency
+      love.filesystem.write("sky_image.png", love.filesystem.read("picked_sky.png"))
       love.filesystem.remove("picked_sky.png")
-      local opts = SaveData.loadOptions()
-      if opts then
-        opts.skyImageEnabled = true
-        SaveData.saveOptions(opts)
-      end
     end
   end
 end
@@ -3280,12 +3272,10 @@ function RomImporter:_installModVersion(modId, release)
   })
 end
 
--- Pick a sky image using the platform's file picker, for time-of-day slot
--- `phase` ("day", "dawn", "dusk", or "night"; defaults to "day").
-function RomImporter:_pickSkyImage(phase)
-  phase = phase or "day"
+-- Pick a sky image using the platform's file picker
+function RomImporter:_pickSkyImage()
   local platform = love.system.getOS()
-  local prompt = "Select Sky Image (" .. phase:upper() .. ")"
+  local prompt = "Select Sky Image"
   
   local HostShell = require("src.core.HostShell")
   local Logger = require("src.core.Logger")
@@ -3303,7 +3293,7 @@ function RomImporter:_pickSkyImage(phase)
     if pickFile("image") then
       -- The picker was launched successfully; the image will be saved as picked_sky.png
       -- in the save directory. We'll need to wait for focus to return and check for the file.
-      self.pickPending = "sky:" .. phase
+      self.pickPending = "sky"
       return
     else
       if Logger then
@@ -3354,35 +3344,47 @@ function RomImporter:_pickSkyImage(phase)
   end
   
   if result then
-    self:_processSkyImage(result, phase)
+    self:_processSkyImage(result)
   end
 end
 
--- Process a selected sky image file for time-of-day slot `phase`.
-function RomImporter:_processSkyImage(filePath, phase)
-  phase = phase or "day"
+-- Process the selected sky image file
+function RomImporter:_processSkyImage(filePath)
   local SaveData = require("src.core.SaveData")
   local Logger = require("src.core.Logger")
-  local Tilt = require("src.render.Tilt")
-
-  -- Tilt:setSkyImage does its own read of filePath (a real OS path, from
-  -- the platform's native file dialog) and writes it into the phase's
-  -- own save-directory slot, so there is nothing left for this function
-  -- to copy itself.
-  Tilt:setSkyImage(filePath, phase)
-
-  if Tilt.skyImages[phase] then
+  
+  -- Read the image file and copy it to the save directory
+  local success, content = pcall(function()
+    local file = io.open(filePath, "rb")
+    if not file then return nil end
+    local data = file:read("*all")
+    file:close()
+    return data
+  end)
+  
+  if success and content then
+    -- Save as sky_image.png in the save directory
+    love.filesystem.write("sky_image.png", content)
+    
+    -- Update options
     local opts = SaveData.loadOptions()
     if opts then
       opts.skyImageEnabled = true
       SaveData.saveOptions(opts)
     end
+    
+    -- Update the tilt renderer
+    local Tilt = require("src.render.Tilt")
+    if Tilt.setSkyImage then
+      Tilt:setSkyImage("sky_image.png")
+    end
+    
     if Logger then
-      Logger.log("info", "Sky image (" .. phase .. ") loaded successfully: " .. filePath)
+      Logger.log("info", "Sky image loaded successfully: " .. filePath)
     end
   else
     if Logger then
-      Logger.log("error", "Failed to load sky image (" .. phase .. "): " .. filePath)
+      Logger.log("error", "Failed to load sky image: " .. filePath)
     end
   end
 end

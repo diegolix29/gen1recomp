@@ -1294,11 +1294,30 @@ local function skyPreviewFor(phase)
   end
   local cached = skyPreviewCache[phase]
   if cached and cached.modtime == info.modtime then return cached.img end
-  local success, img = pcall(love.graphics.newImage, path)
-  if not success then
+  
+  -- Check file size before attempting to load to prevent crashes on low-memory devices
+  local size = info.size or 0
+  -- Skip loading if file is too large (>10MB) to prevent Android crashes
+  if size > 10 * 1024 * 1024 then
+    print("Sky image too large for preview: " .. path .. " (" .. size .. " bytes)")
     skyPreviewCache[phase] = nil
     return nil
   end
+  
+  local success, img = pcall(love.graphics.newImage, path)
+  if not success then
+    print("Failed to load sky image preview: " .. path .. " - " .. tostring(img))
+    skyPreviewCache[phase] = nil
+    return nil
+  end
+  
+  -- Validate the image loaded correctly
+  if not img or type(img) ~= "userdata" then
+    print("Invalid image object loaded: " .. path)
+    skyPreviewCache[phase] = nil
+    return nil
+  end
+  
   skyPreviewCache[phase] = { img = img, modtime = info.modtime }
   return img
 end

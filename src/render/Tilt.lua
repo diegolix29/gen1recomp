@@ -133,13 +133,21 @@ function Tilt.applyOptions(opts)
     for _, phase in ipairs(Tilt.SKY_PHASES) do
       if not Tilt.skyImages[phase] then
         local savePath = Tilt.skyImageFile(phase)
-        if love.filesystem.getInfo(savePath) then
-          local success, img = pcall(love.graphics.newImage, savePath)
-          if success and img then
-            Tilt.skyImages[phase] = img
-            print("Sky image loaded from save directory: " .. savePath)
+        local info = love.filesystem.getInfo(savePath)
+        if info then
+          -- Check file size before attempting to load to prevent crashes on low-memory devices
+          local size = info.size or 0
+          -- Skip loading if file is too large (>10MB) to prevent Android crashes
+          if size > 10 * 1024 * 1024 then
+            print("Sky image too large for loading: " .. savePath .. " (" .. size .. " bytes)")
           else
-            print("Failed to load sky image from save directory: " .. tostring(img))
+            local success, img = pcall(love.graphics.newImage, savePath)
+            if success and img then
+              Tilt.skyImages[phase] = img
+              print("Sky image loaded from save directory: " .. savePath)
+            else
+              print("Failed to load sky image from save directory: " .. tostring(img))
+            end
           end
         end
       end
@@ -320,9 +328,19 @@ function Tilt:setSkyImage(path, phase)
       end
     end
 
+    -- Check file size before attempting to load to prevent crashes on low-memory devices
+    local info = love.filesystem.getInfo(savePath)
+    local size = info and info.size or 0
+    -- Skip loading if file is too large (>10MB) to prevent Android crashes
+    if size > 10 * 1024 * 1024 then
+      print("Sky image too large for loading: " .. savePath .. " (" .. size .. " bytes)")
+      return false
+    end
+    
     local success, img = pcall(love.graphics.newImage, savePath)
     if not success then
       print("Failed to load sky image: " .. tostring(img))
+      return false
     else
       Tilt.skyImages[phase] = img
       print("Sky image loaded successfully from save directory: " .. savePath)
@@ -345,6 +363,16 @@ function Tilt:adoptSkyImageFile(phase, saveRelativePath)
     if not content then return false end
     love.filesystem.write(destPath, content)
   end
+  
+  -- Check file size before attempting to load to prevent crashes on low-memory devices
+  local info = love.filesystem.getInfo(destPath)
+  local size = info and info.size or 0
+  -- Skip loading if file is too large (>10MB) to prevent Android crashes
+  if size > 10 * 1024 * 1024 then
+    print("Sky image too large for adoption: " .. destPath .. " (" .. size .. " bytes)")
+    return false
+  end
+  
   local success, img = pcall(love.graphics.newImage, destPath)
   if not success then return false end
   if Tilt.skyImages[phase] and Tilt.skyImages[phase].release then
