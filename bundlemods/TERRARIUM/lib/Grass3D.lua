@@ -223,9 +223,18 @@ function Grass3D.meshFromInstances(instances)
     -- centre the tuft in its 8x8 tile
     stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale)
   end
-  local mesh = Voxel3D.newMesh(verts, indices)
-  if mesh and loadTexture() then
-    pcall(mesh.setTexture, mesh, loadTexture())
+  -- Convert to grass format with VertexGrass attribute for wind animation
+  local grassVerts = {}
+  for i = 1, #verts do
+    local v = verts[i]
+    -- Add grass attributes: phase (random per tuft), clump centre x/z, effect kind (0 = normal grass)
+    local phase = unit(v[1], v[3], 3) * math.pi * 2
+    grassVerts[i] = { v[1], v[2], v[3], v[4], v[5], v[6], phase, v[1], v[3], 0 }
+  end
+  local mesh = Voxel3D.newGrassMesh(grassVerts, indices)
+  if mesh then
+    local tex = loadTexture()
+    if tex then pcall(mesh.setTexture, mesh, tex) end
   end
   return mesh
 end

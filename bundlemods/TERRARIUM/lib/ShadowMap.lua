@@ -29,7 +29,6 @@ local V = ...
 
 local Mat4 = V.require("Mat4")
 local Voxel = V.require("VoxelState")
-local Quality = V.require("Quality")
 
 local ShadowMap = {}
 
@@ -64,14 +63,6 @@ ShadowMap.KZ = -0.55      -- north drift per pixel of height
 -- to keep crisp, and finer buys nothing the grid can show. The smallest
 -- size that meets it wins, and the ladder tops out at 2048 (16 MB, and the
 -- depth buffer behind it matches) rather than chasing the target forever.
--- These two are now what SHADOWS HIGH uses; the LOW rung halves the ladder
--- and loosens the target (Quality.shadowSizes / shadowTarget), and fit()
--- below reads them from there. The target is the part that actually
--- mattered on a phone: worked against a phone-shaped view, 0.45 world
--- pixels per texel is unreachable at 1024 AND at 1536, so the "smallest
--- rung that meets it" search fell through to 2048 every single frame and
--- the ladder never did anything. A map that is always at its top rung is
--- not a ladder, it is a constant -- and a 4.2-megatexel one.
 ShadowMap.SIZES = { 1024, 1536, 2048 }
 ShadowMap.TARGET = 0.45
 ShadowMap.res = 1024      -- the rung in use; read by the main pass's filter
@@ -139,16 +130,22 @@ local SHADER = [[
   }
 #endif
 #ifdef PIXEL
+  uniform float sprite;   // 1 while the CAST is being drawn; see ShadowMap.sprites
   vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     // the same alpha discard the main pass uses: a sprite card casts its
     // silhouette, not its 16x16 bounding box
     if (Texel(tex, tc).a < 0.5) discard;
-    // pack into two channels: the high byte in red, the low in green
+    // pack into two channels: the high byte in red, the low in green.
+    // Blue says WHAT cast this, which costs a channel that was zero anyway
+    // and lets a surface decline one kind of caster -- water does, for the
+    // people (see Water's sunLit).
     float d = clamp(vDepth, 0.0, 1.0) * 255.0;
-    return vec4(floor(d) / 255.0, fract(d), 0.0, 1.0);
+    return vec4(floor(d) / 255.0, fract(d), sprite, 1.0);
   }
 #endif
 ]]
+
+ShadowMap._source = function() return SHADER end   -- named for the suite
 
 local shader = nil            -- nil = untried, false = unavailable
 local canvas = nil            -- nil = untried, false = unavailable
@@ -158,6 +155,11 @@ local drawing = false
 local ready = false
 local lastSig = nil
 local prevBlend, prevAlphaMode = nil, nil
+
+-- Cache the availability check to prevent repeated re-checking during
+-- route/scene changes. Once available() returns true, we assume the hardware
+-- capabilities don't change during gameplay (context loss is handled elsewhere).
+local availabilityCache = nil  -- nil = untried, true = available, false = unavailable
 
 local IDENTITY = Mat4.identity()
 
@@ -189,7 +191,7 @@ end
 local function getCanvas(res)
   if canvas == false then return nil end
   if canvas and canvasRes == res then return canvas end
-  local ok, c = pcall(love.graphics.newCanvas, res, res)
+  local ok, c = V.require("PixelCanvas").new(res, res)
   if not (ok and c) then
     canvas = false
     return nil
@@ -220,23 +222,47 @@ local function getBlank()
   return blank or nil
 end
 
+-- Whether the player asked for shadows at all (the SHADOWS row, see
+-- lib/Shadows). Asked through a pcall because this module is loaded by
+-- probes and by the suite with no mod namespace around it, where the answer
+-- is simply yes.
+--
+-- ONE gate for both halves of the module -- can the pass run, and is there
+-- a map to read -- because they must never disagree: available() alone
+-- would leave the LAST map standing (`ready` is still true), and every
+-- surface would go on wearing shadows frozen in the pose the row was
+-- switched off in.
+function ShadowMap.wanted()
+  local ok, on = pcall(function() return V.require("Shadows").enabled() end)
+  return (not ok) or on
+end
+
 -- Whether the sun pass can run at all. False headless, without shaders, or
 -- where the canvas cannot be made -- VoxelScene then keeps the flat decal
--- shadows, which need nothing but a quad.
+-- shadows, which need nothing but a quad -- and false with the row off,
+-- where nothing stands in (see lib/Shadows).
 function ShadowMap.available()
-  -- SHADOWS OFF answers here rather than at the call sites, so it takes
-  -- exactly the same route a driver without a depth canvas takes: the sun
-  -- pass never begins and VoxelScene falls back to the flat decal shadows
-  -- it already carries for that case. One path, already written and
-  -- already tested, instead of a second way of having no shadow map.
-  if Quality.shadowsOff() then return false end
-  if not (love.graphics and love.graphics.newCanvas
-          and love.graphics.setDepthMode) then
+  if not ShadowMap.wanted() then return false end
+  if love.system and love.system.getOS and love.system.getOS() == "iOS" then
     return false
   end
+  -- Return cached result if available
+  if availabilityCache ~= nil then
+    return availabilityCache
+  end
+  
+  -- Check basic LOVE graphics capabilities
+  if not (love.graphics and love.graphics.newCanvas
+          and love.graphics.setDepthMode) then
+    availabilityCache = false
+    return false
+  end
+  
   -- the smallest rung is enough to answer the question; fit() picks the
   -- one this frame actually wants
-  return getShader() ~= nil and getCanvas(Quality.shadowSizes()[1]) ~= nil
+  local shaderAvailable = getShader() ~= nil and getCanvas(ShadowMap.SIZES[1]) ~= nil
+  availabilityCache = shaderAvailable
+  return shaderAvailable
 end
 
 -- The map to sample, or the blank stand-in. Never nil once the main pass
@@ -247,16 +273,12 @@ function ShadowMap.texture()
   return getBlank()
 end
 
--- True while the map holds a frame the main pass can read.
---
--- Gated on the setting too, and it has to be: `ready` is sticky, so a
--- player who turns SHADOWS to OFF mid-walk would otherwise leave the last
--- map they drew standing -- the scene shader would keep sampling it and
--- the world would wear one frozen frame of shadows forever, while the
--- decal fallback ALSO drew because castShadows had stopped running.
+-- True while the map holds a frame the main pass can read. The row's OFF
+-- lands here as well as on available(): a map drawn a frame ago is still in
+-- the canvas, and every reader (the scene shader's sunDark, the water's,
+-- the forest's beams) hangs off this one answer.
 function ShadowMap.active()
-  if Quality.shadowsOff() then return false end
-  return ready and canvas ~= nil and canvas ~= false
+  return ready and canvas ~= nil and canvas ~= false and ShadowMap.wanted()
 end
 
 -- The direction the light TRAVELS, normalized. The shear is the shadow a
@@ -279,15 +301,9 @@ ShadowMap.sunDir = sunDir
 -- eases them out rather than the frustum ending on a hard line.
 ShadowMap.FAR_CAP = 2.5     -- multiples of the view height
 
--- `capMul` overrides FAR_CAP for a caller that needs a more generous
--- answer than the shadow frustum wants. The sun pass can afford to give up
--- on the far field -- the shader fades its shadows out at the rim and what
--- is lost is shadows nobody was looking at. GEOMETRY cannot: terrain culled
--- at the cap is terrain that visibly is not there, so VoxelScene asks for a
--- box twice as deep before it drops a chunk (see VoxelScene.bounds).
-local function groundReach(vh, capMul)
+function ShadowMap.groundReach(vh)
   local a = Voxel.angle or 0
-  local cap = (capMul or ShadowMap.FAR_CAP) * vh
+  local cap = ShadowMap.FAR_CAP * vh
   -- half the vertical field of view: the same FOCAL the camera projects
   -- with, so the two frusta agree about what is on screen
   local half = math.atan(1 / (2 * Voxel.FOCAL))
@@ -296,33 +312,6 @@ local function groundReach(vh, capMul)
   local dist = Voxel.FOCAL * vh
   local horizon = dist * math.cos(a) / math.tan(below)
   return math.max(vh / 2, math.min(cap, horizon - dist * math.sin(a)))
-end
-
--- shared with VoxelScene, which fits its own culling box to the same
--- question this answers: how far north of the view centre is there still
--- ground worth drawing
-ShadowMap.groundReach = groundReach
-
--- Draw one caster GROUP -- a map's terrain, chunked (see ChunkMesher) --
--- submitting only the cells that meet `b`, a world XZ box {x0, z0, x1, z1}
--- in the group's own space. nil draws all of them.
---
--- The model matrix is sent ONCE for the whole group rather than per chunk:
--- every cell of a map shares it, and a uniform send per chunk would hand
--- back a good part of what the chunking just saved.
-function ShadowMap.drawGroup(group, texture, model, b)
-  if not (drawing and group and group.chunks) then return end
-  local sh = getShader()
-  pcall(sh.send, sh, "model", "row", model or IDENTITY)
-  local chunks = group.chunks
-  for i = 1, #chunks do
-    local ch = chunks[i]
-    if not b or (ch.x1 >= b[1] and ch.x0 <= b[3]
-                 and ch.z1 + ch.ymax >= b[2] and ch.z0 <= b[4]) then
-      if texture then ch.mesh:setTexture(texture) end
-      love.graphics.draw(ch.mesh)
-    end
-  end
 end
 
 -- Fit the light frustum to the ground the camera can see, plus the margin
@@ -346,7 +335,7 @@ local function fit(cx, cy, vw, vh)
 
   local reach = ShadowMap.HEIGHT
                 * math.max(math.abs(ShadowMap.KX), math.abs(ShadowMap.KZ)) + 24
-  local north = groundReach(vh)
+  local north = ShadowMap.groundReach(vh)
   -- the view widens with distance, so the far ground spans more than the
   -- near ground does; half the depth is a serviceable stand-in for the
   -- frustum's true spread and costs a good deal less resolution
@@ -376,11 +365,9 @@ local function fit(cx, cy, vw, vh)
 
   -- pick the resolution rung: the smallest that resolves TARGET world
   -- pixels per texel across the wider side, else the largest there is
-  local sizes = Quality.shadowSizes()
-  local target = Quality.shadowTarget()
-  local res = sizes[#sizes]
-  for _, size in ipairs(sizes) do
-    if math.max(w, h) / size <= target then
+  local res = ShadowMap.SIZES[#ShadowMap.SIZES]
+  for _, size in ipairs(ShadowMap.SIZES) do
+    if math.max(w, h) / size <= ShadowMap.TARGET then
       res = size
       break
     end
@@ -417,42 +404,6 @@ local function fit(cx, cy, vw, vh)
   -- the stored depth spans the frustum, so a world-pixel bias is that
   -- fraction of it
   ShadowMap.bias = ShadowMap.slack / math.max(1, far - near)
-end
-
--- ------- how big the sun is
---
--- The tangent of the sun's apparent half-angle, which is the one number
--- that decides how fast a shadow's edge widens with distance from what
--- throws it. The real sun's is 0.0047 -- a shadow twenty world pixels off
--- its blocker would soften by a tenth of a pixel, which is nothing on a
--- grid this coarse. So this is a stylised sun, wide enough that a
--- character's head reads softer than their feet at the scale a map cell
--- actually is, and no wider: past this the shadow of a building stops
--- having an edge at all and starts being a gradient.
---
--- Only SHADOWS SOFT reads it (the PCSS branch of the scene shader); every
--- other rung has one fixed edge width and no use for a sun with a size.
-ShadowMap.SUN_SPREAD = 0.05
-
--- Texels of half-shadow per unit of STORED DEPTH between blocker and
--- receiver -- the whole conversion the soft-shadow filter needs, worked out
--- here because all three terms in it live here:
---
---   the stored depth is a fraction of the frustum's own depth, so a unit of
---   it is `extent[3]` world pixels;
---   a world pixel is `res / max(extent[1], extent[2])` texels;
---   and the sun's size turns a world-pixel gap into a world-pixel penumbra.
---
--- Recomputed whenever fit() runs, which is whenever anything the frustum
--- depends on moved. Before the first fit it answers a serviceable constant
--- rather than nil: the shader gets a number every frame either way.
-function ShadowMap.softness()
-  local e = ShadowMap.extent
-  if not e then return 8 end
-  local span = e[3] or 400
-  local texel = math.max(e[1] or 400, e[2] or 400) / math.max(1, ShadowMap.res)
-  if texel <= 1e-4 then return 8 end
-  return span * ShadowMap.SUN_SPREAD / texel
 end
 
 -- How much of the compare's forgiveness a snugged caster takes back, 0..1.
@@ -504,30 +455,8 @@ end
 -- everything the pass depends on (camera, terrain meshes, every pose). A
 -- frame that changes none of it reuses the map it already has, which is
 -- most of a dialog, a menu or any moment standing still.
---
--- That covers STANDING. It does nothing for WALKING, which is the case
--- that hurts: the signature carries the camera at quarter-pixel
--- granularity, so every frame of movement is a fresh stamp and the whole
--- world is rasterised from the sun again to go with it. On the LOW rung a
--- wanted redraw may be deferred by up to Quality.shadowInterval frames,
--- which halves the pass's cost while moving and leaves the shadows at most
--- one frame behind the thing casting them.
---
--- Deferred, not dropped: `deferred` counts the frames a redraw has been
--- waiting, so the interval bounds the staleness rather than making it a
--- coin toss -- and it is reset by finish(), so the first frame of movement
--- after standing still is never the one that gets skipped.
-local deferred = 0
-
 function ShadowMap.stale(sig)
-  if not ready then return true end
-  if sig == lastSig then return false end
-  local every = Quality.shadowInterval()
-  if every > 1 then
-    deferred = deferred + 1
-    if deferred < every then return false end
-  end
-  return true
+  return not ready or sig ~= lastSig
 end
 
 -- Begin the sun pass. Returns false when it could not start, in which case
@@ -555,6 +484,9 @@ function ShadowMap.begin(cx, cy, vw, vh)
   love.graphics.setShader(sh)
   love.graphics.setColor(1, 1, 1, 1)
   pcall(sh.send, sh, "lightVP", "row", ShadowMap.clipVP)
+  -- the world until a cast pass says otherwise, reset per pass so one that
+  -- forgot to put it back cannot leak into the next map's terrain
+  pcall(sh.send, sh, "sprite", 0)
   drawing = true
   ready = false
   return true
@@ -563,12 +495,38 @@ end
 -- Draw one caster. Same signature as Voxel3D.draw minus the camera-ward
 -- pull, which is a trick for the VIEW's depth buffer and would drag a
 -- shadow off whatever throws it.
+-- Whether what is drawn next is one of the CAST -- a walker, an authored
+-- figure, a battle's Pokemon -- rather than part of the world. false for the
+-- length of such a pass, true to put it back.
+--
+-- The map records it per texel (the shader's blue channel) so a surface can
+-- decline that kind of caster, and exactly one does: water. A character
+-- standing at a lake's edge threw a hard cut-out of its own sprite across
+-- the surface, which on something showing the sky and the shoreline reads as
+-- a sticker rather than as a shadow in the water. Everything else -- ground,
+-- roofs, ledges, the characters themselves -- still takes them.
+--
+-- Sent rather than branched, so a caller that forgets to put it back only
+-- mislabels casters rather than losing them; begin() resets it per pass.
+function ShadowMap.sprites(on)
+  if not drawing then return end
+  local sh = getShader()
+  if sh then pcall(sh.send, sh, "sprite", on and 1 or 0) end
+end
+
 function ShadowMap.draw(mesh, texture, model)
   if not (drawing and mesh) then return end
   local sh = getShader()
-  if texture then mesh:setTexture(texture) end
+  if texture then pcall(mesh.setTexture, mesh, texture) end
   pcall(sh.send, sh, "model", "row", model or IDENTITY)
-  love.graphics.draw(mesh)
+  -- Check if mesh has drawable methods before attempting to draw
+  local ok = pcall(function()
+    if type(mesh) == "table" and (mesh.setVertexMap or mesh.setTexture) then
+      love.graphics.draw(mesh)
+    elseif type(mesh) ~= "table" then
+      love.graphics.draw(mesh)
+    end
+  end)
 end
 
 -- Close the pass and stamp it with the signature it was drawn for.
@@ -582,14 +540,33 @@ function ShadowMap.finish(sig)
   love.graphics.setColor(1, 1, 1, 1)
   lastSig = sig
   ready = true
-  deferred = 0
+end
+
+-- The soft shadow filter width: the sun's apparent size, the frustum's own
+-- depth and the rung's texel, condensed into the single number that the
+-- soft filter needs (PCSS). This is called from the main pass to size the
+-- blocker search and the final filter.
+function ShadowMap.softness()
+  -- The texel size in world pixels (already calculated in fit)
+  local texel = math.max(ShadowMap.extent[1], ShadowMap.extent[2]) / ShadowMap.res
+  -- The frustum depth in world pixels
+  local depth = ShadowMap.extent[3]
+  -- The sun's apparent angular size (in radians, ~0.5 degrees for the sun)
+  -- This is a simplified approximation; the real value depends on the sun's
+  -- position in the sky but a constant works well for the visual effect
+  local sunAngularSize = 0.009  -- ~0.5 degrees in radians
+  -- Convert to world-space size at the receiver's distance
+  -- The filter width is proportional to how much the light source "spreads"
+  -- across the texel grid
+  return sunAngularSize * depth / texel
 end
 
 -- Drop the GPU objects (window resize, hot reload).
 function ShadowMap.invalidate()
   canvas, canvasRes, blank = nil, 0, nil
   drawing, ready, lastSig = false, false, nil
-  deferred = 0
+  -- Reset availability cache so it gets re-checked on next available() call
+  availabilityCache = nil
 end
 
 return ShadowMap

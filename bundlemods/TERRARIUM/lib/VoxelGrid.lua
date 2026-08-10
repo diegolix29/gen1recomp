@@ -27,7 +27,7 @@ local ModSetting = V.require("ModSetting")
 
 local VoxelGrid = {}
 
--- the key under options.modOptions.<mod.id>, shared by the row in
+-- the key under options.modOptions.DRAMATIC_SHAPE, shared by the row in
 -- OPTIONS and the mod manager's own settings page for this mod
 VoxelGrid.KEY = "grid"
 VoxelGrid.LABEL = "V-GRID"
@@ -44,23 +44,30 @@ VoxelGrid.DARK = 0.45
 -- 1.0 here is the one-pixel wireframe.
 VoxelGrid.WIDTH = 1.0
 
+-- The same width in the CANVAS pixels the shader measures in, which is what
+-- every sender of it actually wants.
+--
+-- The two are the same number until AA renders the pass larger than the
+-- window (see AntiAlias): there a canvas pixel is a fraction of a display
+-- one, and a width left at 1.0 would come out a half or a quarter of a line
+-- after the fold -- the wireframe fading as the smoothing goes up, which
+-- reads as one row breaking the other. Scaled, it stays a one-pixel seam and
+-- simply gains the antialiasing everything else in the frame just gained.
+function VoxelGrid.width()
+  return VoxelGrid.WIDTH * V.require("AntiAlias").factor()
+end
+
 -- where it persists and the rows that cycle it (see ModSetting)
 VoxelGrid.setting = ModSetting.new(VoxelGrid.KEY, VoxelGrid.LABEL,
                                    { false, true }, { "OFF", "ON" })
 
--- A pass that needs the wireframe whatever the player left the row on sets
--- this for the length of its own draw and puts it back after. nil means
--- "follow the setting", which is every frame outside such a pass.
---
--- The overworld battle is the one user: a fight is a STAGED shot, not the
--- world being walked around in, and the seams are what make it read as
--- constructed rather than as a photograph of somewhere. The row still owns
--- what free-roam looks like, and is not written to -- switching the mode off
--- mid-battle would silently rewrite the player's own setting.
-VoxelGrid.override = nil
-
+-- The row is the whole answer, everywhere: free-roam and the battle arena
+-- alike. The battle used to force the seams on regardless -- a fight is a
+-- STAGED shot, and the seams are what make it read as constructed rather
+-- than photographed -- but a player who turns the wireframe off means the
+-- whole mod, and a mode that came back for every fight read as the row not
+-- working rather than as a deliberate framing.
 function VoxelGrid.enabled()
-  if VoxelGrid.override ~= nil then return VoxelGrid.override end
   return VoxelGrid.setting:get() and true or false
 end
 

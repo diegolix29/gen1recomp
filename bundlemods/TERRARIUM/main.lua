@@ -143,6 +143,23 @@ local FirstPerson = V.require("FirstPerson")
 local ThirdPerson = V.require("ThirdPerson")
 local CamControl = V.require("CamControl")
 local FreeMove = V.require("FreeMove")
+local ViewBox = V.require("ViewBox")
+local DrawDistance = V.require("DrawDistance")
+local Shiny = V.require("Shiny")
+local ShinyBattle = V.require("ShinyBattle")
+local ShinyUI = V.require("ShinyUI")
+local ForestAtmos = V.require("ForestAtmos")
+local Shadows = V.require("Shadows")
+local AntiAlias = V.require("AntiAlias")
+local VR = V.require("VR")
+local PlayerModel = V.require("PlayerModel")
+local PlayerModelInstall = V.require("PlayerModelInstall")
+local PlayerModelPick = V.require("PlayerModelPick")
+local SettingsMenu = V.require("SettingsMenu")
+local Horde = V.require("Horde")
+local HordeGun = V.require("HordeGun")
+local LetsGo = V.require("LetsGo")
+local Pokeball = V.require("Pokeball")
 
 -- Forward declaration: the voxel pipeline's update hook (registered below)
 -- calls this, and it is defined further down with the settings it drives.
@@ -221,6 +238,11 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     -- would fight anyone who changed one deliberately.
     applyFull(level)
     Voxel.update(dt, level)
+    -- Check for deferred follower load when Stadium models become available
+    local okFollower, StadiumFollower = pcall(V.require, "StadiumFollower")
+    if okFollower and StadiumFollower then
+      StadiumFollower.checkDeferred()
+    end
     -- the first-person head, on the same tick: its blend in and out of the
     -- orbit, the mouse capture lifecycle, and the frame's stick-rate look.
     -- Unconditional like Voxel.update, because the blend has to keep easing
@@ -231,6 +253,16 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     -- battles and menus, and a CYCLE evening falls mid-fight exactly as it
     -- would mid-walk
     DayNight.update(dt)
+    -- the atmosphere's own clock (shaft shimmer, drifting motes)
+    ForestAtmos.update(dt)
+    -- LET'S GO rides the same always-running tick, before the battle update
+    do
+      local okLG, errLG = pcall(LetsGo.update, dt)
+      if not okLG and not V.letsGoWarned then
+        V.letsGoWarned = true
+        mod.log:warn("LET'S GO update failed: %s", tostring(errLG))
+      end
+    end
     -- The overworld battle rides this hook rather than owning a pipeline of
     -- its own, because it owns no pass of the FRAME: it draws under a battle
     -- screen the engine composites, which is not a stage the registry has.
@@ -240,6 +272,17 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     -- and the whole battle. Ahead of the active() gate below, because a 3D
     -- battle does not require the free-roam mode to be switched on.
     OverworldBattle.update(dt)
+    -- One-time Stadium model build and player model load
+    pcall(function() V.require("StadiumScreen").maybePush() end)
+    pcall(function()
+      if not PlayerModel.loaded() and PlayerModelInstall.installed() then
+        PlayerModel.loadInstalled()
+      end
+    end)
+    pcall(function()
+      V.require("StadiumRomPick").poll(require("src.core.Game"))
+    end)
+    Horde.update(dt)
     -- The wild Pokemon standing in the grass ride the same hook for one of
     -- the same two reasons: it is the tick that keeps running whatever is on
     -- top, which is what lets the population notice a map arriving while a
@@ -405,6 +448,9 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     Voxel3D.invalidate()
     OverworldBattle.invalidate()
     ChunkMesher.invalidate()   -- no map id = every cached mesh
+    ForestAtmos.invalidate()
+    VR.invalidate()
+    Pokeball.invalidate()
     -- the ground decals are GPU objects on the same footing: meshes and two
     -- generated strips, all rebuilt on demand
     GroundFX.dropGPU()
@@ -480,6 +526,8 @@ applyFull = function(level)
   -- the horizon flat. The curve bends the world away from a walking player,
   -- which fights a fixed diorama framing
   WorldCurve.setting:setIndex(1, Game)
+  ViewBox.setting:setIndex(1, Game)
+  Water.setting:setIndex(1, Game)
   -- and the view fitted to the window
   opts.zoom = 0
   Zoom.applyOptions(opts)
@@ -527,6 +575,11 @@ local function stagedBattles()
 end
 
 local SETTINGS = {
+  { Shiny.setting,
+    "How often a wild Pokemon turns up shiny. 1:8192 is the games' own "
+    .. "rate, and every rung below it is twice as often as the one above.",
+    cat = SettingsMenu.ROOT, full = true },
+
   -- `full` on both: FULL owns the rows that describe the LOOK, and what
   -- this device can afford to draw is not one of them. A preset that took
   -- the performance rows off the menu would be a preset a player on a slow
@@ -536,12 +589,12 @@ local SETTINGS = {
     "How much of the panel's resolution the 3D pass renders at, before it "
     .. "is scaled back up. Lower is squarer and much faster -- this is the "
     .. "one that decides whether the diorama runs at all on a slow device.",
-    full = true },
+    cat = "perf", full = true },
   { Quality.shadowSetting,
     "LOW keeps real cast shadows on a smaller map with a harder edge and "
     .. "no neighbouring maps casting. OFF drops the sun pass entirely and "
     .. "puts the flat drop shadows back under people's feet.",
-    full = true },
+    cat = "perf", full = true },
   -- `full = true` as well, and for a plainer reason than the two above:
   -- FULL is the preset most people arrive at, and taking the wind off the
   -- menu there would hide the one row that decides whether the world looks
@@ -557,15 +610,16 @@ local SETTINGS = {
     .. "as it goes over, each tuft has its own stiffness, rain weighs it "
     .. "down and damps it, settled snow bows it over, feet flatten it and "
     .. "it springs back.",
-    full = true },
+    cat = "world", full = true },
   { Water.setting,
     "The water surface as geometry rather than a scrolling picture: it "
     .. "rises and falls on two crossing swells, cel-shaded into flat "
     .. "dithered bands -- crests a shade lighter, troughs deeper -- with "
     .. "a hard-ringed toon glint where a crest turns into the sun, and "
     .. "white FOAM lapping the shoreline on the tide's own clock. FLAT "
-    .. "is the old still plane.",
-    full = true },
+    .. "is the old still plane. SKY reflects the sun and moon alone; FULL "
+    .. "adds the shoreline and trees behind it.",
+    cat = "world" },
   { Light.setting,
     "SKY lights the world with two lights instead of one -- the sun, warm "
     .. "and directional, and the sky, cool and from everywhere. A shadow "
@@ -732,13 +786,13 @@ local SETTINGS = {
     .. "single Potion goes in. MAX is 999 against a game that ships about a "
     .. "hundred and ten items -- you cannot fill it. Set 20 for the "
     .. "original.",
-    full = true },
+    cat = SettingsMenu.ROOT, full = true },
   { Carry.stackSetting,
     "How many of ONE item the bag holds. Gen 1 stops at ninety-nine. Note "
     .. "that a single purchase is still capped at ninety-nine by the shop's "
     .. "own quantity box -- what this lifts is the size of the PILE, so you "
     .. "can go back and buy more. Set 99 for the original.",
-    full = true },
+    cat = SettingsMenu.ROOT, full = true },
   { Routines.setting,
     "The people have something to do. Civilians look around, turn toward "
     .. "the sign or the door they are standing beside, and stand in pairs "
@@ -805,52 +859,62 @@ local SETTINGS = {
     .. "actually fought gets the text box, so a six-strong party does not "
     .. "cost six presses after every fight. OFF is the original's rule. "
     .. "Fainted Pokemon are paid nothing at every rung.",
-    full = true },
-  { VoxelGrid.setting, "One-pixel wireframe along every voxel edge." },
+    cat = SettingsMenu.ROOT, full = true },
+
+  -- ------- 3D WORLD -- the diorama's own knobs
+  { VoxelGrid.setting, "One-pixel wireframe along every voxel edge.",
+    cat = "world" },
   { WorldCurve.setting,
-    "Bend the world down over the horizon, Animal Crossing style." },
+    "Bend the world down over the horizon, Animal Crossing style.",
+    cat = "world" },
+  { ViewBox.setting,
+    "How far out the camera bothers to draw, which only changes the picture "
+    .. "above about 63 degrees where the horizon comes into view.",
+    cat = "world" },
   { Aerial.setting,
     "Distance haze: far ground fades into the hour's own sky colour, so "
-    .. "the map edge reads as far away instead of as a wall." },
+    .. "the map edge reads as far away instead of as a wall.",
+    cat = "world" },
   { Skyline.setting,
     "The rest of Kanto on the horizon: every connected map out to the "
     .. "chosen distance, drawn as a bare silhouette in the hour's haze. "
-    .. "Scenery only -- nothing out there can be walked on." },
-  -- `full` marks a row FULL does not take away. FULL owns the diorama's own
-  -- knobs; what a battle is drawn over, and how it is framed, are not that.
+    .. "Scenery only -- nothing out there can be walked on.",
+    cat = "world" },
+
+  -- ------- BATTLES
+  { DrawDistance.setting,
+    "How many adjacent maps to render: OFF (no limit), NEAR (0 neighbors), "
+    .. "MILD (2 neighbors), or FAR (4 neighbors).",
+    cat = "battles" },
   { OverworldBattle.setting,
     "Fight on the map: the battle draws over the nearest clear ground, "
-    .. "shot over the shoulder with a slow parallax drift.",
-    full = true },
-  -- Only offered while a fight can actually be staged on the map: with 3D-BTL
-  -- off the engine draws the classic screen, which is this row's ON already,
-  -- and a row that no longer decides anything is worse than no row.
+    .. "shot over the shoulder with a slow parallax drift, as cards or "
+    .. "Stadium's animated models.",
+    cat = "battles",
+    when = function() return not VR.enabled() end, full = true },
   { OverworldBattle.backSetting,
     "Keep your own Pokemon on the battle menu, seen from behind in its "
     .. "original slot, instead of standing it on the map facing the foe. "
     .. "The foe is still out there on its own tile.",
-    when = function() return stagedBattles() end, full = true },
-  -- `full` for the reason the battle rows have it and more plainly: this is
-  -- not a knob on the diorama at all, it is what the grass is made of. A
-  -- preset that owns the look has no business owning it.
+    cat = "battles",
+    when = function() return stagedBattles() and not VR.enabled() end,
+    full = true },
+  { LetsGo.setting,
+    "Pokemon GO-style catching -- flick to throw the ball, with FULL adding "
+    .. "half-price balls and party experience (needs 3D-BTL).",
+    cat = "battles", full = true },
   { WildRoamers.setting,
     "Wild Pokemon you can see: the map's own encounter table decides who is "
     .. "standing in the grass right now, wearing their own art and wandering "
     .. "their own patch, and the fight starts when you walk into one. ROAM "
     .. "switches the blind roll off, so what you fight is what you walked "
     .. "into; MIX leaves it on as well; OFF is the dice alone.",
-    full = true },
-  -- Only offered while something is out there to count. With WILD OFF the
-  -- number of them is zero whatever this says, and a row that no longer
-  -- decides anything is worse than no row.
+    cat = SettingsMenu.ROOT, full = true },
   { WildRoamers.countSetting,
     "How many wild Pokemon stand within reach at once. Each is one more "
     .. "sprite card in the frame, so FEW is the setting for a slow device.",
-    when = function() return WildRoamers.enabled() end, full = true },
-  -- `full = true` for the reason WILD has it: this is not a knob on the
-  -- diorama, it is what is out there. Offered whatever WILD is set to,
-  -- because it reaches the blind roll as well as the visible Pokemon --
-  -- the engine's own encounter.species seam is where the dice get it.
+    when = function() return WildRoamers.enabled() end,
+    cat = SettingsMenu.ROOT, full = true },
   { Ecology.setting,
     "Who is out RIGHT NOW. Gen 2 gave every route a morning, a day and a "
     .. "night table and it is most of what made Johto feel like a place; "
@@ -868,22 +932,20 @@ local SETTINGS = {
     .. "route's own levels. TIME is the hour alone. Indoors none of it "
     .. "applies, for the reason a cave at midnight is exactly as dark as a "
     .. "cave at noon.",
-    full = true },
+    cat = SettingsMenu.ROOT, full = true },
   { DayNight.setting,
     "What time it is outdoors: pin the sky to DAY, NIGHT, DUSK or DAWN, "
     .. "let CYCLE run it -- ten minutes of sun, ten of moon, with the "
     .. "shadows, the sky and the light following -- or SYNC it to the "
-    .. "clock on the wall, so Kanto's evening falls when yours does." },
-  -- Night depth and street lamps travel together in the options list: DEEP
-  -- only reads as a city night when something is lit on the street, and
-  -- LAMPS only matter once the sky is dark enough to need them.
+    .. "clock on the wall, so Kanto's evening falls when yours does.",
+    cat = "world" },
   { DayNight.darkSetting,
     "How dark night is. DEEP takes a large step down from the soft blue "
     .. "night so a town reads as lit windows and street lamps in real "
     .. "darkness -- the sky and the world's tint both drop. SOFT is the "
     .. "older, more readable blue night. Windows and street-lamp heads "
     .. "are exempt either way: they burn after the hour's multiply.",
-    full = true },
+    cat = "world", full = true },
   { StreetLamps.setting,
     "Street lamps in towns and cities. ON plants three models of post "
     .. "(classic, twin-head, globe) on sidewalk cells next to buildings, "
@@ -891,18 +953,44 @@ local SETTINGS = {
     .. "lamp. After dusk the heads burn in the hour's lamp colour so a "
     .. "DEEP night still has light on the street. Routes and forests get "
     .. "none -- only outdoor maps without a grass encounter table.",
-    full = true },
-  -- Orientation radar. Always-on by default at the cheap rung; FULL adds a
-  -- local 4-colour cell grid. Not the classic Town Map item -- that stays
-  -- untouched. full = true so a phone on FULL RES can still hide it.
+    cat = "world", full = true },
   { MiniMap.setting,
     "Corner orientation radar on free-roam. ON is player + facing + "
     .. "Center/Gym/Gate icons from the map's own warps; FULL also paints a "
     .. "4-colour walkability grid of the current map (regenerated only on "
     .. "map change). OFF is nothing. Drops detail on low RES. Purely HUD -- "
     .. "nothing here writes collision, flags or scripts.",
+    cat = "battles", full = true },
+
+  -- ------- PERFORMANCE
+  { ForestAtmos.setting,
+    "Haze and volumetric light shafts in the deep woods, with pollen in the "
+    .. "beams by day and fireflies at night.",
+    cat = "perf", full = true },
+  { Shadows.setting,
+    "Real cast shadows from the sun, and the first thing to switch off on a "
+    .. "phone or an old machine.",
+    cat = "perf", full = true },
+  { AntiAlias.setting,
+    "Smooths the stair-stepped edges of the 3D world, and the most "
+    .. "expensive row in the mod.",
+    cat = "perf", full = true },
+
+  -- ------- VR
+  { VR.setting,
+    "PCVR through OpenXR on Windows, either following the VOXEL ladder or "
+    .. "as a DIORAMA you carry and turn with the grips.",
+    cat = "vr",
+    when = function() return VR.supported() end, full = true },
+  { VR.smoothTurn,
+    "Turns smoothly with the right stick instead of snapping 45 degrees, "
+    .. "if you have your sea legs for it.",
+    cat = "vr",
+    when = function() return VR.enabled() and not VR.dioramaMode() end,
     full = true },
 }
+
+SettingsMenu.define(SETTINGS)
 
 local schema = {}
 for i, entry in ipairs(SETTINGS) do
