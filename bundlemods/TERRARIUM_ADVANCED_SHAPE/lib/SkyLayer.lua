@@ -72,6 +72,11 @@ if not (okFP and type(FirstPerson) == "table") then
 end
 local okDN, DayNight = pcall(V.require, "DayNight")
 
+-- Try to load the Tilt module to access sky image with full options support
+local okTilt, Tilt = pcall(function()
+  return require("src.render.Tilt")
+end)
+
 local Sky = {}
 
 -- ------- clouds
@@ -1047,6 +1052,25 @@ function Sky.draw(state)
 
   local drewClouds, birdCount = false, 0
   local starNote = ""
+
+  -- ---- draw custom sky image if available (replaces solid color background)
+  -- Use the same Tilt system as the main game for consistency, and the
+  -- same shared Quad-based panorama draw (Tilt:drawSkyPanorama) the base
+  -- Renderer and the ADVANCED_SHAPE mod use -- see Tilt:drawSkyLayer for
+  -- why this fixes both the black-rectangle bug and the sky never really
+  -- panning past a quarter turn. This build predates DayNight's phase
+  -- mix (see the header on FirstPerson above), so no weights are passed:
+  -- it shows whichever single image resolves as "day".
+  -- This should be drawn BEFORE the backdrop so the horizon appears in front
+  if okTilt and Tilt then
+    guarded(function()
+      love.graphics.setDepthMode("lequal", false)
+      local ww, wh = love.graphics.getDimensions()
+      Tilt:drawSkyPanorama(ww, wh)
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.setDepthMode("lequal", true)
+    end)
+  end
 
   -- ---- the night sky: field, twinklers, and the occasional streak
   if cfg.stars ~= false then

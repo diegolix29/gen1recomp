@@ -89,7 +89,7 @@ local function config()
 end
 
 -- Distance walked, accumulated from the entity's own position.  Driving
--- the bob from DISTANCE rather than from TIME is what keeps it locked to
+-- the bob from DISTANCE rather than from time is what keeps it locked to
 -- the feet: stand still and it stops mid-stride instead of bobbing on the
 -- spot, and it cannot drift out of phase however the framerate wobbles.
 local function advance(me)
@@ -136,7 +136,7 @@ function Jump.eyeOffset(me)
 
     local off = lift * mult
 
-    -- the load: a dip in the moments before the arc starts.
+    -- the load: a dip in the moments before the arc starts lifting.
     -- The engine gives no warning of a hop, so this reads the first
     -- frames of the arc itself and dips against them -- brief, and it
     -- resolves into the rise rather than fighting it.

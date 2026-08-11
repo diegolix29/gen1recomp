@@ -26,6 +26,10 @@ local GroundFX = V.require("GroundFX")
 local Quality = V.require("Quality")
 local Wind = V.require("Wind")
 local Water = V.require("Water")
+local Ceiling = V.require("Ceiling")
+local Backdrop = V.require("Backdrop")
+local SkyLayer = V.require("SkyLayer")
+local Flora = V.require("Flora")
 local Roamer = V.require("Roamer")
 local StreetLamps = V.require("StreetLamps")
 local Skyline = V.require("Skyline")
@@ -1023,7 +1027,17 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
 
   Voxel3D.snowTop = GroundFX.snowTint(state.map)
   local box = VoxelScene.bounds(cx, cy, vw, vh, false)
+  -- the sky (lib/SkyLayer.lua) then distant horizon (lib/Backdrop.lua):
+  -- before the terrain, depth writes off, so every real surface draws over them
+  -- Sky draws first as background, then horizon draws in front of it
+  pcall(SkyLayer.draw, state)
+  pcall(Backdrop.draw, state)
+
   Voxel3D.drawGroup(terrain, atlasFor(state.map), nil, nil, nil, box)
+
+  -- interiors, then ground detail (lib/Ceiling.lua, lib/Flora.lua)
+  pcall(Ceiling.draw, state, atlasFor)
+  pcall(Flora.draw, state, atlasFor)
   for i, nb in ipairs(state.neighbors or {}) do
     Voxel3D.drawGroup(nbMesh[i], atlasFor(nb.map),
                       Mat4.translate(nb.ox, 0, nb.oy), nil, nil,
