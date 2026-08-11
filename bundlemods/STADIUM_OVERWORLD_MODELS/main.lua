@@ -5,13 +5,50 @@
 -- model packs after the player has built them from their own compatible ROM.
 local mod = ...
 
-local ds = mod.find("DRAMATIC_SHAPE")
-assert(ds and ds.exports and ds.exports.lib,
-  "STADIUM_OVERWORLD_MODELS: Dramatic Shape must be installed, enabled, and loaded first")
+-- v0.1.55: the voxel host is intentionally OPTIONAL in manifest.json.
+-- Dramatic Shape forks usually preserve exports.lib.require, but some forks
+-- intentionally use a different mod id (notably DRAMALESS_SHAPE).  Making one
+-- id a hard dependency caused Gen1Recomp to reject otherwise compatible hosts
+-- before runtime capability detection.  Detect a usable voxel host instead.
+local DRAMATIC_SHAPE_IDS = {
+  "DRAMALESS_SHAPE",
+  "DRAMATIC_SHAPE",
+  "DRAMATIC_SHAPE_VOXEL",
+  "VOXEL_COMBO",  
+  "DRAMATIC_SHAPE_VOXEL_MOD",
+}
 
-local BaseV = ds.exports.lib
-assert(type(BaseV.require) == "function",
-  "STADIUM_OVERWORLD_MODELS: Dramatic Shape did not export its library loader")
+local function findDramaticShapeHost()
+  for _, id in ipairs(DRAMATIC_SHAPE_IDS) do
+    local ok, candidate = pcall(mod.find, id)
+    if ok and candidate and candidate.exports then
+      local lib = candidate.exports.lib
+      -- Handle combo package (VOXEL_COMBO) which uses namespaced exports
+      if not lib and candidate.exports.dramatic then
+        lib = candidate.exports.dramatic.lib
+      end
+      if type(lib) == "table" and type(lib.require) == "function" then
+        return candidate, lib, id
+      end
+    end
+  end
+  return nil, nil, nil
+end
+
+local ds, BaseV, dramaticShapeId = findDramaticShapeHost()
+if not BaseV then
+  -- Do not crash or make the mod manager call the add-on incompatible.  The
+  -- model overlay simply stays dormant until a compatible Dramatic Shape
+  -- build is installed/enabled.
+  mod.log:warn("No compatible Dramatic Shape voxel host detected; Stadium overworld models are dormant")
+  mod.exports.version = "0.1.56"
+  mod.exports.rendererInstalled = false
+  mod.exports.rendererError = "No compatible Dramatic Shape voxel host detected"
+  mod.exports.hostDetected = false
+  return
+end
+mod.log:info("Dramatic Shape host detected via %s; enabling Stadium compatibility layer",
+             tostring(dramaticShapeId))
 
 -- Followers EX owns its own pack / controlled-Pokemon follower lifecycle.
 -- When present, we consume its entity metadata but do not alter Yellow's stock
@@ -110,6 +147,12 @@ local managerOptionsInstalled = StadiumRomMenu.installModManagerOptions(mod)
 if not managerOptionsInstalled then
   StadiumRomMenu.installOptionsHook(mod)
 end
+
+-- Android may recreate the app while the native document picker is open.
+-- Finish a pending Stadium selection as soon as the game stack is ready.
+mod.events:on("game.ready", function(game)
+  pcall(StadiumRomMenu.poll, game)
+end)
 
 -- Yellow's stock follower controller normally exists only while a healthy
 -- Pikachu is somewhere in the party. For this add-on the entity is our
@@ -496,6 +539,7 @@ end
 local V = {
   mod = mod,
   path = mod.path,
+  voxelHostId = dramaticShapeId,
 }
 setmetatable(V, { __index = BaseV })
 function V.require(name)
@@ -557,7 +601,7 @@ else
 end
 
 -- Companion mods can tag a Pokemon entity explicitly through this mod.
-mod.exports.version = "0.1.43"
+mod.exports.version = "0.1.56"
 mod.exports.overworld = Stadium
 mod.exports.romMenu = StadiumRomMenu
 mod.exports.chooseStadiumRom = function(game)
@@ -570,6 +614,8 @@ mod.exports.untag = function(entity)
   return Stadium.untag(entity)
 end
 
+mod.exports.hostDetected = true
+mod.exports.hostId = dramaticShapeId
 mod.exports.rendererInstalled = rendererInstalled
 mod.exports.rendererError = rendererErr
 mod.exports.battleAnimationsInstalled = battleAnimationsInstalled

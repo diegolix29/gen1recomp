@@ -1,0 +1,21 @@
+{
+  "id": "DRAMATIC_SHAPE",
+  "name": "Terrarium + Advanced Voxel Mod (Combo)",
+  "version": "1.6.0",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "content",
+  "category": "GRAPHICS",
+  "game_version": "0.0.0-dev || >=0.0.0 <2.0.0",
+  "priority": 100,
+  "dependencies": [],
+  "optional_dependencies": [],
+  "conflicts": [],
+  "permissions": [
+    "engine_internals",
+    "filesystem"
+  ],
+  "affects_link": false,
+  "description": "TERRARIUM (1.15.0-mobile.snow.1) and ADVANCED_SHAPE (1.5.5) packaged and loaded together as one mod install, each running its full, unmodified feature set side by side: TERRARIUM's life-sim diorama layer (wild Pokemon standing in the grass, ambient life, weather, city life, an auto-farm bot, ecology, ground puddles/snow, shelter behavior, quality-of-life rows) and ADVANCED_SHAPE's camera/combat layer (first-person and free-move camera rungs, VR, shiny hunting, custom Stadium player/follower/wild models, the Horde minigame, LET'S GO capture). Registers all four render pipelines (terrarium_voxel/terrarium_tiltshift and voxel/tiltshift) and every hotkey from both forks -- letters v/g/t/c/b/n/p/h/k/j from TERRARIUM, numbers 3/5/6/7/8/9 from ADVANCED_SHAPE -- with no collisions between them by design. Two separate lib/ and data/ trees (lib_terrarium+data_terrarium, lib_dramatic+data_dramatic) since the forks diverged well past main.lua; one shared assets/ tree since neither fork's asset folder names collide.",
+  "github_terrarium": "BrenoBertucci/Terrarium"
+}

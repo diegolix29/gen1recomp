@@ -28,6 +28,7 @@ No Pokemon Stadium ROM, extracted model files, or Nintendo assets are distribute
 
 - Gen1Recomp compatible with the manifest range
 - Dramatic Shape (`DRAMATIC_SHAPE`)
+- Dramaless Shape (`DRAMALESS_SHAPE`)
 - A user-supplied compatible Pokemon Stadium ROM for local model import
 
 Optional integrations include Followers EX and Dramatic Sky Ride.
@@ -80,3 +81,23 @@ Gen1Recomp can use GitHub Releases from this repository for **Update / Versions*
 
 ### 0.1.51
 - Mankey now uses a dedicated Stadium locomotion animation instead of the near-static generic standby, slowed and tuned into a brisk walking gait.
+
+
+## Multi-fork compatibility (v0.1.55)
+
+Dramatic Shape is now an optional manifest dependency so Gen1Recomp does not
+reject this mod before runtime when a compatible fork is installed. The mod
+capability-detects the voxel host and supports both the newer `drawCast()`
+renderer layout and the older 1.0.x layout where the character pass is inside
+`VoxelScene.render()`. If no compatible host is present, the add-on loads
+safely in a dormant state instead of crashing.
+
+
+## Dramaless Shape compatibility
+
+v0.1.55 detects `DRAMALESS_SHAPE` as a native voxel host through its exported `lib.require` interface. Wild Pokemon renderer ownership also follows the detected host id instead of being hard-coded to `DRAMATIC_SHAPE`.
+
+
+## v0.1.56 - Mobile Stadium ROM import
+
+Android Stadium ROM selection now imports directly from the system document picker into the voxel host's Stadium builder. The temporary picker file is consumed as soon as the app resumes; a second 32 MB `baseroms` copy and restart are no longer required. Both current `picked_rom.gb` and dedicated `picked_stadium.z64` mobile bridge targets are recognized.

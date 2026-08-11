@@ -72,6 +72,20 @@ local POSES = [====[local function posesOf(state, spriteColors)
   local posed = {}
   local me = nil
 
+  -- Gameplay facing (collision/scripts) is always compass-relative and
+  -- must never change; only the FRAME drawn should follow the camera,
+  -- exactly like the flat/tilt billboard passes (see Camera.lua's header
+  -- comment). screenFacing is a no-op (returns compassFacing unchanged)
+  -- whenever the camera is at its default north step, so an unrotated
+  -- camera draws identically to before.
+  local cam = state.camera
+  local function drawnFacing(compassFacing)
+    if cam and cam.screenFacing then
+      return cam:screenFacing(compassFacing)
+    end
+    return compassFacing
+  end
+
   for gi, g in ipairs(state.ghosts or {}) do
     local npc = g and g.npc
     if npc and type(npc.pose) == "function" then
@@ -80,7 +94,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
       posed[#posed + 1] = {
         sprite = sprite, px = (vx or npc.px or 0) + (g.ox or 0),
         py = (npc.py or vy or 0) + (g.oy or 0),
-        facing = facing, phase = phase, flip = flip,
+        facing = drawnFacing(facing), phase = phase, flip = flip,
         gh = groundAt(ghostMap, npc.cellX, npc.cellY),
         lift = (npc.py or vy or 0) - (vy or npc.py or 0),
         colors = spriteColors(ghostMap),
@@ -93,7 +107,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
   for ei, e in ipairs(state.entities or {}) do
     -- Dramatic Shape normally omits the player during Fly because the engine's
     -- 2D Fly overlay draws it separately. Followers EX can turn the PLAYER
-    -- entity itself into a Pokemon; in that case keep it in the Stadium cast
+    -- entity itself into a Pokemon; in that case keep the Stadium cast
     -- even while flyAnim is active. Ordinary human players still follow the
     -- stock skip rule, avoiding a duplicate trainer.
     local playerPokemonDuringFly = e == state.player and type(e) == "table"
@@ -136,7 +150,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
 
       posed[#posed + 1] = {
         sprite = sprite, px = px, py = py,
-        facing = facing, phase = phase, flip = flip,
+        facing = drawnFacing(facing), phase = phase, flip = flip,
         gh = gh, lift = py - (vy or py), colors = colors,
         entity = e, entityIndex = ei,
         mapId = state.map and state.map.id,
@@ -144,6 +158,21 @@ local POSES = [====[local function posesOf(state, spriteColors)
       if e == state.player then
         me = posed[#posed]
         me.isPlayer = true
+      end
+      -- Mark Pikachu follower for Stadium model rendering
+      if e.pikachuFollower then
+        posed[#posed].isFollower = true
+      end
+      -- Carry over wild-spawn identity so StadiumWilds can recognize this
+      -- entity (isWildPokemon) and resolve its species to a dex number
+      -- (getEntitySpeciesDex) for stadium model loading. Without this, the
+      -- pose entry has none of the fields StadiumWilds looks for and every
+      -- wild Pokemon silently falls back to its flat sprite.
+      if e.overworldWildSpawn then
+        posed[#posed].overworldWildSpawn = true
+        posed[#posed].id = e.id
+        posed[#posed].spawnId = e.spawnId
+        posed[#posed].species = e.species
       end
     end
   end
@@ -166,36 +195,114 @@ end
 -- Replace only the character loop inside drawCast, leaving every terrain,
 -- figure, grass, glass and reflection detail from the installed DS untouched.
 local function patchCastLoop(source)
+  -- Newer Dramatic Shape releases route character drawing through drawCast().
+  -- Patch that seam when present.
   local fn = source:find("local function drawCast", 1, true)
-  if not fn then return nil, "missing VoxelScene drawCast()" end
-  local a = source:find("  local hideMe = FirstPerson.hidePlayer()", fn, true)
-  if not a then
-    a = source:find("local hideMe = FirstPerson.hidePlayer()", fn, true)
-  end
-  if not a then return nil, "missing drawCast player-hide seam" end
+  if fn then
+    local a = source:find("  local hideMe = FirstPerson.hidePlayer()", fn, true)
+    if not a then
+      a = source:find("local hideMe = FirstPerson.hidePlayer()", fn, true)
+    end
+    if not a then return nil, "missing drawCast player-hide seam" end
 
-  local glass = source:find("  Voxel3D.glass(true)", a, true)
-  if not glass then glass = source:find("Voxel3D.glass(true)", a, true) end
-  if not glass then return nil, "missing drawCast glass restore seam" end
+    local glass = source:find("  Voxel3D.glass(true)", a, true)
+    if not glass then glass = source:find("Voxel3D.glass(true)", a, true) end
+    if not glass then return nil, "missing drawCast glass restore seam" end
 
-  local block = [====[  local hideMe = FirstPerson.hidePlayer()
+    local block = [====[  local hideMe = FirstPerson.hidePlayer()
   for _, p in ipairs(posed) do
     if not (p.isPlayer and hideMe) and not OverworldStadium.safeShouldHidePose(p) then
-      -- Check if this is the player and ADVANCED_SHAPE's PlayerModel is loaded
-      local okPlayerModel, PlayerModel = pcall(V.require, "PlayerModel")
-      if p.isPlayer and okPlayerModel and PlayerModel and PlayerModel.loaded() then
-        -- Draw custom 3D model instead of sprite
-        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), viewFacing(p), p.flip)
-      -- safeDraw never throws.  Returning false means this one entity uses
+      -- safeDraw never throws. Returning false means this one entity uses
       -- Dramatic Shape's original 2D card for this frame.
-      elseif not OverworldStadium.safeDraw(p) and p.sprite then
+      if not OverworldStadium.safeDraw(p) and p.sprite then
         drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                   p.colors, p.lift, yaw)
+                   p.colors, p.lift)
       end
     end
   end
 ]====]
-  return source:sub(1, a - 1) .. block .. source:sub(glass)
+    return source:sub(1, a - 1) .. block .. source:sub(glass), "drawCast"
+  end
+
+  -- Older/derived forks (notably the 1.0.x renderer family) have no
+  -- drawCast() helper. Their final character pass lives directly inside
+  -- VoxelScene.render(). Replace ONLY that exact final loop; shadow/signature
+  -- loops remain untouched. This keeps the same fork's terrain/camera code.
+  local variants = {
+[====[  for _, p in ipairs(posed) do
+    drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+               p.colors, p.lift)
+  end
+]====],
+[====[  for _, p in ipairs(posed) do
+    drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh, p.colors, p.lift)
+  end
+]====],
+-- TERRARIUM merge variant with extra parameters and player hide check
+[====[  for _, p in ipairs(posed) do
+    if p ~= me or not hideMe then
+      drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+                 p.colors, p.lift, p.waterline, p == me, yaw)
+    end
+  end
+]====],
+-- TERRARIUM lib_terrarium variant with waterline but no player hide check
+[====[  for _, p in ipairs(posed) do
+    drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+               p.colors, p.lift, p.waterline)
+  end
+]====],
+  }
+
+  local old
+  for _, candidate in ipairs(variants) do
+    if countPlain(source, candidate) == 1 then
+      old = candidate
+      break
+    end
+  end
+  if not old then
+    return nil, "missing both modern drawCast seam and legacy render character loop"
+  end
+
+  -- Choose the appropriate replacement based on which variant was found
+  local block
+  if old:find("waterline", 1, true) and old:find("p ~= me", 1, true) then
+    -- TERRARIUM merge variant with extra parameters and player hide check
+    block = [====[  for _, p in ipairs(posed) do
+    if (p ~= me or not hideMe) and not OverworldStadium.safeShouldHidePose(p) then
+      if not OverworldStadium.safeDraw(p) and p.sprite then
+        drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+                   p.colors, p.lift, p.waterline, p == me, yaw)
+      end
+    end
+  end
+]====]
+  elseif old:find("waterline", 1, true) then
+    -- TERRARIUM lib_terrarium variant with waterline but no player hide check
+    block = [====[  for _, p in ipairs(posed) do
+    if not OverworldStadium.safeShouldHidePose(p) then
+      if not OverworldStadium.safeDraw(p) and p.sprite then
+        drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+                   p.colors, p.lift, p.waterline)
+      end
+    end
+  end
+]====]
+  else
+    -- Standard variant
+    block = [====[  for _, p in ipairs(posed) do
+    if not OverworldStadium.safeShouldHidePose(p) then
+      if not OverworldStadium.safeDraw(p) and p.sprite then
+        drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
+                   p.colors, p.lift)
+      end
+    end
+  end
+]====]
+  end
+  local a, b = source:find(old, 1, true)
+  return source:sub(1, a - 1) .. block .. source:sub(b + 1), "legacy-render"
 end
 
 local function patchPrepare(source)
@@ -239,7 +346,14 @@ function M.install(ds, BaseV, namespace, Stadium)
   end
   if scene._stadiumOverworldStructuralPatch then return true end
 
-  local source, err = readInstalled(BaseV, "lib/VoxelScene.lua")
+  -- Handle combo package (VOXEL_COMBO) which uses separate lib directories
+  local sourcePath = "lib/VoxelScene.lua"
+  local source, err = readInstalled(BaseV, "lib_dramatic/VoxelScene.lua")
+  if source then
+    sourcePath = "lib_dramatic/VoxelScene.lua"
+  else
+    source, err = readInstalled(BaseV, "lib/VoxelScene.lua")
+  end
   if not source then return false, err end
 
   -- Required bridge and table identity. These are tiny, stable declarations.
@@ -265,8 +379,9 @@ function M.install(ds, BaseV, namespace, Stadium)
 
   source, err = patchPoses(source)
   if not source then return false, err end
-  source, err = patchCastLoop(source)
-  if not source then return false, err end
+  local castPatchMode
+  source, castPatchMode = patchCastLoop(source)
+  if not source then return false, castPatchMode end
   source, err = patchPrepare(source)
   if not source then return false, err end
 
@@ -280,7 +395,7 @@ function M.install(ds, BaseV, namespace, Stadium)
   namespace.OriginalVoxelScene = scene
   local chunk, compileErr = load(source,
     "@" .. tostring((BaseV and BaseV.path) or "DRAMATIC_SHAPE") ..
-    "/lib/VoxelScene.lua+stadium-overworld-v16")
+    "/" .. sourcePath .. "+stadium-overworld-v16")
   if not chunk then
     return false, "patched VoxelScene did not compile: " .. tostring(compileErr)
   end
@@ -312,8 +427,8 @@ function M.install(ds, BaseV, namespace, Stadium)
 
   M.shadowIntegrated = shadowIntegrated and true or false
   safeLog(namespace.mod, "info",
-    "Stadium overworld structural renderer installed (3D shadow seam: %s)",
-    tostring(M.shadowIntegrated))
+    "Stadium overworld structural renderer installed (layout: %s, 3D shadow seam: %s)",
+    tostring(castPatchMode or "unknown"), tostring(M.shadowIntegrated))
   return true
 end
 

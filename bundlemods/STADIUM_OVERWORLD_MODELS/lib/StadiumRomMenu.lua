@@ -16,9 +16,14 @@ local V = ...
 local M = {}
 
 local PICKED_ROM = "picked_rom.gb"
+local PICKED_STADIUM = "picked_stadium.z64"
 local PENDING_FLAG = "stadium_overworld_picker_pending.flag"
-local STAGE_DIR = "baseroms"
-local STAGE_PATH = "baseroms/baserom.z64"
+
+-- Android compatibility note:
+-- Gen1Recomp's currently deployed native picker copies the generic "rom"
+-- selection to picked_rom.gb.  Some voxel-host/mobile builds already reserve
+-- a dedicated picked_stadium.z64 target.  Watch both names so the companion
+-- works with either bridge without another release.
 
 local function text(s, ...)
   local ok, Strings = pcall(require, "src.core.Strings")
@@ -58,9 +63,10 @@ local function setStatus(value)
   M._status = value
 end
 
-local function stagedPath()
+local function pickedPath()
   if not (love and love.filesystem and love.filesystem.getInfo) then return nil end
-  if love.filesystem.getInfo(STAGE_PATH, "file") then return STAGE_PATH end
+  if love.filesystem.getInfo(PICKED_STADIUM, "file") then return PICKED_STADIUM end
+  if love.filesystem.getInfo(PICKED_ROM, "file") then return PICKED_ROM end
   return nil
 end
 
@@ -76,13 +82,12 @@ end
 
 local function cleanupStagingIfReady()
   if not stadiumReady() then return false end
-  -- Once StadiumInstall's completion marker says the 151-pack cache is
-  -- current, Dramatic Shape reads models from dramatic_shape/stadium. The
-  -- temporary 32 MB ROM copy is no longer needed and should not keep
-  -- re-triggering startup/import probes.
+  -- The ROM is only an import source.  Once all Stadium packs are current,
+  -- remove any Android picker leftovers so a later boot cannot mistake them
+  -- for a fresh import.
   safeRemove(PENDING_FLAG)
   safeRemove(PICKED_ROM)
-  safeRemove(STAGE_PATH)
+  safeRemove(PICKED_STADIUM)
   setStatus("READY")
   return true
 end
@@ -90,120 +95,102 @@ end
 local function n64Format(data)
   if type(data) ~= "string" or #data < 4 then return nil end
   local a, b, c, d = data:byte(1, 4)
-  -- Standard N64 ROM byte orders:
-  --   z64 / big endian : 80 37 12 40
-  --   v64 / byteswapped: 37 80 40 12
-  --   n64 / little endian: 40 12 37 80
   if a == 0x80 and b == 0x37 and c == 0x12 and d == 0x40 then return "z64" end
   if a == 0x37 and b == 0x80 and c == 0x40 and d == 0x12 then return "v64" end
   if a == 0x40 and b == 0x12 and c == 0x37 and d == 0x80 then return "n64" end
   return nil
 end
 
-local function normalizeToZ64(data, fmt)
-  if fmt == "z64" then return data end
-  local out = {}
-  local chunk = 8192
-  if fmt == "v64" then
-    -- Byte-swapped N64 images: swap each 16-bit pair.
-    for base = 1, #data, chunk do
-      local last = math.min(#data, base + chunk - 1)
-      if ((last - base + 1) % 2) ~= 0 then last = last - 1 end
-      local part = {}
-      for i = base, last, 2 do
-        part[#part + 1] = string.char(data:byte(i + 1), data:byte(i))
-      end
-      out[#out + 1] = table.concat(part)
-    end
-    return table.concat(out)
-  elseif fmt == "n64" then
-    -- Little-endian N64 images: reverse each 32-bit word.
-    for base = 1, #data, chunk do
-      local last = math.min(#data, base + chunk - 1)
-      last = last - ((last - base + 1) % 4)
-      local part = {}
-      for i = base, last, 4 do
-        part[#part + 1] = string.char(
-          data:byte(i + 3), data:byte(i + 2), data:byte(i + 1), data:byte(i))
-      end
-      out[#out + 1] = table.concat(part)
-    end
-    return table.concat(out)
-  end
-  return nil
+local function resolveGame(game)
+  if game and game.stack then return game end
+  local ok, Game = pcall(require, "src.core.Game")
+  if ok and Game and Game.stack then return Game end
+  return game
 end
 
-local function notifyDramaticShape(game)
-  local p = picker()
-  if p and type(p.poll) == "function" then
-    local ok = pcall(p.poll, game)
-    if not ok then pcall(p.poll, p, game) end
+local function pushBuildScreen(game)
+  game = resolveGame(game)
+  if not (game and game.stack) then return false end
+  local okScreen, StadiumScreen = pcall(V.require, "StadiumScreen")
+  if not (okScreen and type(StadiumScreen) == "table"
+      and type(StadiumScreen.new) == "function") then return false end
+  local ok = pcall(function()
+    game.stack:push(StadiumScreen.new(game, true))
+  end)
+  return ok
+end
+
+local function failAndroid(game, why)
+  local okInstall, install = pcall(V.require, "StadiumInstall")
+  if okInstall and type(install) == "table" and type(install.status) == "table" then
+    install.status.state = "failed"
+    install.status.error = tostring(why or "could not import Stadium ROM")
   end
+  safeRemove(PENDING_FLAG)
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("IMPORT ERROR")
+  pushBuildScreen(game)
+  return true, why
 end
 
 local function consumeAndroidPick(game)
   if not (love and love.filesystem and love.filesystem.getInfo
-      and love.filesystem.read and love.filesystem.write) then
+      and love.filesystem.read) then
     return false
   end
   if not love.filesystem.getInfo(PENDING_FLAG, "file") then return false end
-  if not love.filesystem.getInfo(PICKED_ROM, "file") then return false end
 
-  local data, err = love.filesystem.read(PICKED_ROM)
+  local source = pickedPath()
+  if not source then return false end
+
+  -- Do not consume the only copy until the game stack exists. Android may
+  -- recreate the process while the system document picker is open; leaving
+  -- the file in place lets game.ready finish the import safely afterwards.
+  game = resolveGame(game)
+  if not (game and game.stack) then return false end
+
+  local data, err = love.filesystem.read(source)
   if type(data) ~= "string" then
-    safeRemove(PENDING_FLAG)
-    safeRemove(PICKED_ROM)
-    setStatus("READ ERROR")
-    return true, err
+    return failAndroid(game, err or "could not read selected file")
   end
 
-  local ext = n64Format(data)
-  if not ext then
-    safeRemove(PENDING_FLAG)
-    safeRemove(PICKED_ROM)
-    setStatus("NOT N64")
-    return true, "selected file is not an N64 ROM image"
+  -- Reject obvious wrong picks here. StadiumRom.open performs the full
+  -- normalization/validation again, including .v64 and .n64 byte order.
+  if not n64Format(data) then
+    return failAndroid(game, "selected file is not an N64 ROM image")
   end
 
-  if love.filesystem.createDirectory then
-    local ok = love.filesystem.createDirectory(STAGE_DIR)
-    if ok == false then
-      safeRemove(PENDING_FLAG)
-      setStatus("WRITE ERROR")
-      return true, "could not create " .. STAGE_DIR
-    end
+  local okInstall, install = pcall(V.require, "StadiumInstall")
+  if not (okInstall and type(install) == "table"
+      and type(install.beginFrom) == "function") then
+    return failAndroid(game, "voxel host has no Stadium importer")
   end
 
-  -- Dramatic Shape's Android helper specifically scans baseroms/baserom.z64.
-  -- Normalize .v64/.n64 byte orders so every Android picker selection lands at
-  -- that exact canonical path without asking the player to rename/copy it.
-  local normalized = normalizeToZ64(data, ext)
-  if type(normalized) ~= "string" then
-    safeRemove(PENDING_FLAG)
-    safeRemove(PICKED_ROM)
-    setStatus("CONVERT ERROR")
-    return true, "could not normalize selected N64 ROM"
+  -- Mobile v0.1.56: feed the picked bytes straight to the voxel host. The
+  -- previous path wrote a second 32 MB copy into baseroms and required a
+  -- restart, then the host read that entire copy again. Direct beginFrom is
+  -- exactly the desktop import path and avoids that extra disk/memory churn.
+  local okBegin, started, beginErr = pcall(install.beginFrom, data, source)
+  if not okBegin then
+    return failAndroid(game, started)
+  end
+  if not started then
+    return failAndroid(game, beginErr or "Stadium ROM was rejected")
   end
 
-  safeRemove(STAGE_PATH)
-  local okWrite, writeErr = love.filesystem.write(STAGE_PATH, normalized)
-  if okWrite == false or okWrite == nil then
-    safeRemove(PENDING_FLAG)
-    setStatus("WRITE ERROR")
-    return true, writeErr
-  end
-
-  -- The SAF copy is temporary. The original ROM stays wherever the user picked
-  -- it (Downloads, SD card, Drive, etc.). Only the importer-facing staging copy
-  -- is kept in the game's private save area.
-  safeRemove(PICKED_ROM)
+  safeRemove(source)
   safeRemove(PENDING_FLAG)
-  pcall(love.filesystem.write, "stadium_overworld_rom_path.txt", STAGE_PATH)
-  -- Dramatic Shape's own StadiumInstall starts when the overworld boots.
-  -- Do not poke its legacy picker state here; on Android the clean path is:
-  -- choose -> restart/boot -> StadiumInstall imports -> READY marker.
-  setStatus("RESTART")
-  return true, STAGE_PATH
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("IMPORTING")
+
+  if not pushBuildScreen(game) then
+    -- Keep a marker so game.ready / the manager update can attach the screen
+    -- that drives StadiumInstall.step(). The build itself remains alive.
+    pcall(love.filesystem.write, PENDING_FLAG, "build-screen\n")
+  end
+  return true
 end
 
 function M.poll(game)
@@ -246,6 +233,7 @@ local function startAndroidPicker()
   -- flag survives and the next mod load can still consume picked_rom.gb.
   pcall(love.filesystem.write, PENDING_FLAG, "stadium\n")
   safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
   setStatus("PICK...")
 
   -- Gen1Recomp currently recognizes rom/mod/sav kinds.  "rom" opens the
@@ -348,8 +336,7 @@ local function makeRow(source)
   out.value = function(game)
     M.poll(game)
     if M._status then return text(M._status) end
-    if stagedPath() then return text("RESTART") end
-    local upstream = valueFromSource(source, game)
+      local upstream = valueFromSource(source, game)
     if upstream ~= nil then return upstream end
     return text("CHOOSE")
   end
@@ -419,7 +406,6 @@ end
 function M.value(game)
   M.poll(game)
   if M._status then return text(M._status) end
-  if stagedPath() then return text("RESTART") end
   local source = rawRow()
   local upstream = valueFromSource(source, game)
   if upstream ~= nil then return upstream end
@@ -472,6 +458,20 @@ function M.installModManagerOptions(mod)
       return rows
     end
     ManagerState._stadiumOverworldRomOptionsPatched = true
+  end
+
+  -- Keep polling while the Mod Manager is active. On Android the native
+  -- document picker returns asynchronously; this consumes the result on the
+  -- first resumed frame instead of relying on the option row being redrawn or
+  -- requiring another button press.
+  if type(ManagerState.update) == "function"
+      and not ManagerState._stadiumOverworldRomPollPatched then
+    local originalUpdate = ManagerState.update
+    ManagerState.update = function(self, dt, ...)
+      pcall(M.poll, self and self.game)
+      return originalUpdate(self, dt, ...)
+    end
+    ManagerState._stadiumOverworldRomPollPatched = true
   end
 
   M._managerInstalled = true

@@ -31,6 +31,7 @@
 -- row for the runtime toggle.
 
 local DS_ID = "DRAMATIC_SHAPE"
+
 local STATE_FILE = "ds_fp_ceiling_state"
 local MARK = "Ceiling.draw"   -- present in VoxelScene.lua only when patched
 
@@ -442,7 +443,8 @@ return function(mod)
     if exact then return exact, "block" end
 
     -- otherwise find the terrain draw itself, whatever its arguments are
-    local line = vs:match("[^\n]-Voxel3D%.draw%(%s*terrain[^\n]*")
+    -- (TERRARIUM merge uses Voxel3D.drawGroup instead of Voxel3D.draw)
+    local line = vs:match("[^\n]-Voxel3D%.drawGroup?%(%s*terrain[^\n]*")
     if not line then return nil end
     local before = "  -- the sky (lib/SkyLayer.lua) then distant horizon (lib/Backdrop.lua):\n"
       .. "  -- before the terrain, depth writes off, so every real surface"
@@ -639,8 +641,10 @@ return function(mod)
     -- was already restored, and explains itself in the log.
     -- (1.3.0 is absol89's fork, which numbers itself independently)
     local TESTED = { ["1.3.0"] = true, ["1.5.4"] = true, ["1.5.5"] = true,
-                     ["1.6.0"] = true, ["1.6.1"] = true, ["1.6.2"] = true }
-    if base and ver and not TESTED[ver] then
+                     ["1.6.0"] = true, ["1.6.1"] = true, ["1.6.2"] = true,
+                     ["1.19.0-merge.2"] = true }
+    -- Also accept any 1.6.x merge version
+    if base and ver and not TESTED[ver] and not ver:match("^1%.[0-9]+%.[0-9]+-merge") then
       say(("Dramatic Shape %s is a version this patch has not been "
            .. "tested against. NOT patching -- everything is left "
            .. "stock. An update of Kanto in First Person will follow.")
