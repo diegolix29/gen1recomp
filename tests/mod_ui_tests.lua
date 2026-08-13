@@ -287,7 +287,8 @@ local WANT_IDS = { "textSpeed", "animations", "battleStyle", "battleLayout",
                    "performance", "colors",
                    "tilt", "gbcfx", "zoom", "voidFill", "videoMode",
                    "faithfulRes", "fpsCap",
-                   "speed", "mods", "controls" }
+                   "speedOverworld", "speedBattle", "speedMenu",
+                   "mods", "controls", "dateFormat", "timeFormat" }
 check(#om.rows == #WANT_IDS, "vanilla options row count (plus MODS/CONTROLS)")
 for i, id in ipairs(WANT_IDS) do
   check(om.rows[i].id == id, "options row order: " .. id)
@@ -383,7 +384,7 @@ check(FrameCap.current == 60, "FrameCap.applyOptions defaults a missing key to 6
 -- the MODS row is the manager's discoverable home
 local mgGame = optGame()
 om = OptionsMenu.new(mgGame)
-om.rows[22].activate(mgGame)
+om.rows[24].activate(mgGame)
 check(getmetatable(mgGame.stack:top()) == ManagerState,
   "the MODS row opens the manager")
 check(mgGame.stack:top().screenId == "ManagerState",
@@ -393,7 +394,7 @@ check(mgGame.stack:top().screenId == "ManagerState",
 local BindingsMenu = require("src.ui.BindingsMenu")
 local cbGame = optGame()
 om = OptionsMenu.new(cbGame)
-om.rows[23].activate(cbGame)
+om.rows[25].activate(cbGame)
 local bm = cbGame.stack:top()
 check(getmetatable(bm) == BindingsMenu,
   "the CONTROLS row opens the rebind list")
@@ -407,6 +408,23 @@ check(bm.items[1].label == "UP" and bm.items[1].right == "UP/D-UP"
   "with no rebind the rows mirror the fixed map, key and pad both (#589)")
 check(cbGame.save.options.bindings == nil,
   "opening the screen alone writes nothing")
+
+-- shared date/time presentation stays in options.lua and is available to
+-- engine UI and mods without becoming checkpoint progress
+om.game.save.options.dateFormat = "device"
+om.game.save.options.timeFormat = "device"
+check(om.rows[26].value(om.game) == "DEVICE",
+  "DATE FORMAT defaults to device locale")
+om.rows[26].step(om.game, 1)
+check(om.game.save.options.dateFormat == "dmy"
+      and om.rows[26].value(om.game) == "DD-MM-YYYY",
+  "DATE FORMAT exposes deterministic DMY override")
+check(om.rows[27].value(om.game) == "DEVICE",
+  "TIME FORMAT defaults to device locale")
+om.rows[27].step(om.game, 1)
+check(om.game.save.options.timeFormat == "24h"
+      and om.rows[27].value(om.game) == "24 HOUR",
+  "TIME FORMAT exposes deterministic 24-hour override")
 check(bm.onKeyPressed == nil and bm.onGamepadPressed == nil,
   "no raw-input claim until a capture is armed")
 press(bm, "a")

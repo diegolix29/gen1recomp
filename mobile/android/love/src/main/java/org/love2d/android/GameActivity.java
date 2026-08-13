@@ -144,15 +144,35 @@ public class GameActivity extends SDLActivity {
 
     private static native void nativeSetDefaultStreamValues(int sampleRate, int framesPerBurst);
 
+    /**
+     * Native libraries required by an optional Android host extension.
+     *
+     * Subclasses supplied by another product flavor may override this method.
+     * The libraries are loaded after LÖVE's dependencies and before liblove;
+     * liblove must remain last because SDL treats the final entry as the main
+     * shared object.
+     */
+    protected String[] getHostLibraries() {
+        return new String[0];
+    }
+
     @Override
     protected String[] getLibraries() {
-        return new String[] {
-            "c++_shared",
-            "mpg123",
-            "openal",
-            "love",
-        };
+        String[] hostLibraries = getHostLibraries();
+        String[] libraries = new String[hostLibraries.length + 4];
+        libraries[0] = "c++_shared";
+        libraries[1] = "mpg123";
+        libraries[2] = "openal";
+        System.arraycopy(hostLibraries, 0, libraries, 3, hostLibraries.length);
+        libraries[libraries.length - 1] = "love";
+        return libraries;
     }
+
+    protected void onHostCreateBeforeSDL(Bundle savedInstanceState) {}
+    protected void onHostCreateAfterSDL(Bundle savedInstanceState) {}
+    protected void onHostResume() {}
+    protected void onHostPause() {}
+    protected void onHostDestroy() {}
 
     @Override
     protected String getMainSharedObject() {
@@ -193,7 +213,9 @@ public class GameActivity extends SDLActivity {
             intent.setData(null);
         }
 
+        onHostCreateBeforeSDL(savedInstanceState);
         super.onCreate(savedInstanceState);
+        onHostCreateAfterSDL(savedInstanceState);
         if (savedInstanceState != null) {
             // Restore the in-flight SAF destinations, so a pick that returns to
             // a recreated activity still lands under the basename it asked for.
@@ -342,6 +364,7 @@ public class GameActivity extends SDLActivity {
             Log.d("GameActivity", "Cancelling vibration");
             vibrator.cancel();
         }
+        onHostDestroy();
         super.onDestroy();
     }
 
@@ -352,12 +375,14 @@ public class GameActivity extends SDLActivity {
             vibrator.cancel();
         }
         teardownSecondaryDisplay();
+        onHostPause();
         super.onPause();
     }
 
     @Override
     public void onResume() {
         super.onResume();
+        onHostResume();
         setupSecondaryDisplay();
     }
 
@@ -627,6 +652,45 @@ public class GameActivity extends SDLActivity {
      * The body lands in a .part file and is renamed only once complete, so a
      * dropped connection can never leave a half file the caller trusts.
      */
+    /**
+     * TLS client sockets, exposed as love.system.tls* and used by the
+     * Archipelago mod for wss:// rooms. LuaSocket speaks TCP only, so without
+     * these a hosted room -- every one of which is TLS-only -- is unreachable
+     * from the game. The work is in TlsSocket; these are the static entry
+     * points, because the JNI side resolves methods on the activity's own
+     * class (see love/src/common/android.cpp) and cannot see other classes
+     * from a worker thread.
+     */
+    @Keep
+    public static int tlsOpen(String host, int port) {
+        return TlsSocket.open(host, port);
+    }
+
+    @Keep
+    public static int tlsStatus(int handle) {
+        return TlsSocket.status(handle);
+    }
+
+    @Keep
+    public static int tlsSend(int handle, byte[] data) {
+        return TlsSocket.send(handle, data);
+    }
+
+    @Keep
+    public static byte[] tlsReceive(int handle, int max) {
+        return TlsSocket.receive(handle, max);
+    }
+
+    @Keep
+    public static String tlsError(int handle) {
+        return TlsSocket.error(handle);
+    }
+
+    @Keep
+    public static void tlsClose(int handle) {
+        TlsSocket.close(handle);
+    }
+
     @Keep
     public static boolean httpDownload(String url, String destPath, String userAgent, String accept) {
         if (url == null || destPath == null) return false;

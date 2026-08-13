@@ -13,6 +13,17 @@
 -- (main.lua then drives it with the mouse); POKEPORT_TOUCH=0 forces it
 -- off everywhere.
 --
+-- BOTH GENERATIONS, one module.  Red/Blue/Yellow reach it from
+-- src/core/Game.lua and Gold from src/core/Game2.lua, through the same six
+-- seams in the same order: init + applyOptions at boot, touchpressed /
+-- touchmoved / touchreleased ahead of the mod pointer hook (the pad keeps
+-- first refusal, #807), noteGamepad on any controller input, joystickremoved
+-- when the last pad goes away, reset on focus/visibility loss, and draw as the
+-- last thing in the frame -- after the post passes, so the controls are never
+-- inside the CRT/GBC grid the picture is being shown through.  One
+-- options.touchControls block serves both games, so a layout edited in the
+-- launcher's editor is the layout Gold draws.
+--
 -- Player preferences (options.touchControls) can permanently disable the
 -- overlay and/or override per-control positions as normalized window
 -- fractions.  Positions and a size multiplier are stored per orientation
@@ -147,17 +158,21 @@ end
 -- would be dropped on every editor save.
 -- love.system.vibrate takes a duration and nothing else, so "intensity" is a
 -- duration preset: Android runs the platform vibrator for exactly that long,
--- while iOS ignores the duration and fires the fixed system vibration, so
--- there the three levels all read as simply on.
-TouchControls.HAPTICS = { "off", "light", "medium", "heavy" }
+-- while iOS maps each duration to a matching Taptic Engine impact.
+TouchControls.HAPTICS = { "off", "light", "normal", "strong" }
 TouchControls.HAPTIC_DEFAULT = "light"
 
-local HAPTIC_SECONDS = { off = 0, light = 0.012, medium = 0.025, heavy = 0.045 }
+local HAPTIC_SECONDS = {
+  off = 0, light = 0.012, normal = 0.025, strong = 0.045,
+}
 local HAPTIC_LABELS = {
-  off = "OFF", light = "LIGHT", medium = "MEDIUM", heavy = "HEAVY",
+  off = "OFF", light = "LIGHT", normal = "NORMAL", strong = "STRONG",
 }
 
 function TouchControls.normalizeHaptics(level)
+  if level == "physical" then return "light" end
+  if level == "medium" then return "normal" end
+  if level == "heavy" then return "strong" end
   if HAPTIC_SECONDS[level] then return level end
   return TouchControls.HAPTIC_DEFAULT
 end
@@ -260,6 +275,10 @@ function TouchControls.defaultLayout(ww, wh, ox, oy, scale)
   local hGap = hotkeyW * 1.25
   local hCenterX = ww / 2
   
+  local ok, GameVersion = pcall(require, "src.core.GameVersion")
+  if ok and GameVersion.isGold and GameVersion.isGold() then
+    margin = math.max(margin, math.min(ww * 0.10, 72))
+  end
   return {
     dpad = { cx = ox + margin + dpadW / 2, cy = oy + wh - margin - dpadW / 2, w = dpadW },
     a = { cx = ox + ww - margin - abW * 0.55, cy = oy + wh - margin - abW * 1.75, w = abW },

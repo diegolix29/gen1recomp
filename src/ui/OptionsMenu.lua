@@ -50,7 +50,31 @@ local Rulesets = {
   modern_clean = require("src.battle.rulesets.modern_clean"),
 }
 local FILTERS = { "OFF", "1X", "2X", "3X" }
+local DATE_FORMATS = {
+  { "device", "DEVICE" }, { "dmy", "DD-MM-YYYY" },
+  { "mdy", "MM-DD-YYYY" }, { "ymd", "YYYY-MM-DD" },
+}
+local TIME_FORMATS = {
+  { "device", "DEVICE" }, { "24h", "24 HOUR" }, { "12h", "12 HOUR" },
+}
 local SKY_PIXELATION = { "OFF", "2X", "4X", "8X", "16X" }
+
+local function preferenceIndex(rows, value)
+  for index, row in ipairs(rows) do
+    if row[1] == value then return index end
+  end
+  return 1
+end
+
+local function preferenceStep(rows, value, direction)
+  local index = preferenceIndex(rows, value)
+  direction = direction and direction < 0 and -1 or 1
+  return rows[((index - 1 + direction) % #rows) + 1][1]
+end
+
+local function preferenceLabel(rows, value)
+  return rows[preferenceIndex(rows, value)][2]
+end
 
 local function speedIndex(game)
   -- default matches InitOptions' TEXT_DELAY_MEDIUM in wOptions
@@ -547,14 +571,35 @@ local function buildRows(game)
         return true
       end },
     -- fast-forward the logic clock only; music and sfx keep their tempo
-    -- (src/core/GameSpeed.lua), so this is safe to leave on
-    { id = "speed", label = Strings("GAME SPEED"),
+    -- (src/core/GameSpeed.lua), so this is safe to leave on. Per-category
+    -- (RFC 0007): overworld walking, battle turns and menu navigation each
+    -- cycle their own multiplier -- GameSpeed.CATEGORIES is the single
+    -- source of truth for which three rows exist.
+    { id = "speedOverworld", label = Strings("OVERWORLD SPEED"),
       value = function(g)
-        return GameSpeed.levelLabel(g.save.options.speed)
+        return GameSpeed.levelLabel(g.save.options.speedOverworld)
       end,
       step = function(g, dir)
         local o = g.save.options
-        o.speed = GameSpeed.cycle(o.speed, dir)
+        o.speedOverworld = GameSpeed.cycle(o.speedOverworld, dir)
+        return true
+      end },
+    { id = "speedBattle", label = Strings("BATTLE SPEED"),
+      value = function(g)
+        return GameSpeed.levelLabel(g.save.options.speedBattle)
+      end,
+      step = function(g, dir)
+        local o = g.save.options
+        o.speedBattle = GameSpeed.cycle(o.speedBattle, dir)
+        return true
+      end },
+    { id = "speedMenu", label = Strings("MENU SPEED"),
+      value = function(g)
+        return GameSpeed.levelLabel(g.save.options.speedMenu)
+      end,
+      step = function(g, dir)
+        local o = g.save.options
+        o.speedMenu = GameSpeed.cycle(o.speedMenu, dir)
         return true
       end },
     -- the manager's discoverable home (18-mod-manager-ux); inert until
@@ -572,6 +617,24 @@ local function buildRows(game)
     { id = "controls", label = Strings("CONTROLS"),
       activate = function(g)
         require("src.ui.Screens").push(g, "BindingsMenu")
+      end },
+    { id = "dateFormat", label = Strings("DATE FORMAT"),
+      value = function(g)
+        return Strings(preferenceLabel(DATE_FORMATS, g.save.options.dateFormat))
+      end,
+      step = function(g, dir)
+        g.save.options.dateFormat = preferenceStep(
+          DATE_FORMATS, g.save.options.dateFormat, dir)
+        return true
+      end },
+    { id = "timeFormat", label = Strings("TIME FORMAT"),
+      value = function(g)
+        return Strings(preferenceLabel(TIME_FORMATS, g.save.options.timeFormat))
+      end,
+      step = function(g, dir)
+        g.save.options.timeFormat = preferenceStep(
+          TIME_FORMATS, g.save.options.timeFormat, dir)
+        return true
       end },
     -- hotkey rebinding UI (display hotkeys like COLORS/TILT/ZOOM)
     { id = "hotkeys", label = Strings("HOTKEYS"),
@@ -616,7 +679,7 @@ local function buildRows(game)
         end
       end },
     -- Haptic feedback for on-screen pad presses (#806): OFF / LIGHT /
-    -- MEDIUM / HEAVY, where the intensity is a vibration duration --
+    -- NORMAL / STRONG, where the intensity is a vibration duration --
     -- love.system.vibrate takes nothing else.  Hidden with TOUCH PAD below,
     -- since the only thing that buzzes is a virtual button press.
     { id = "haptics", label = Strings("VIBRATION"),
@@ -630,7 +693,7 @@ local function buildRows(game)
         o.haptics = TC.cycleHaptics(o.haptics, dir)
         TC:applyOptions(o)
         -- sample the level being selected: stepping the row is the only way
-        -- to compare LIGHT against HEAVY without leaving the menu
+        -- to compare LIGHT against STRONG without leaving the menu
         TC.buzz(o.haptics)
         return true
       end },

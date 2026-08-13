@@ -12,10 +12,33 @@ The modding book lives on the
 - [Registry reference](https://github.com/bryanthaboi/gen1recomp/wiki/Reference-Registries)
   — every registry, generated from `src/mods/Schemas.lua`.
 
-Regenerate the reference straight into a wiki checkout:
+Regenerate the reference. With no argument it writes in-repo, to
+`docs/modding/reference/registries.md`; name a wiki checkout to write the
+wiki's own page name into it instead:
 
 ```sh
+luajit tools/gen_registry_docs.lua
 luajit tools/gen_registry_docs.lua ../gen1recomp.wiki
+```
+
+## Mods and Gold (Gen 2)
+
+The mod API is one API across both generations, but Gold runs its own battle
+engine, overworld, script VM and save format, so a mod says which games it is
+for and Gold serves a declared subset of the surface.
+
+- [`docs/preparing-your-mod-for-gen2.md`](preparing-your-mod-for-gen2.md)
+  the migration guide: what breaks, the `games` manifest key, the module
+  adapter, the patterns no adapter can fix, and a worked before/after.
+- [`docs/mod-api-gen2-compat.md`](mod-api-gen2-compat.md)
+  the reference: every registry, hook and event, whether Gold serves it, and
+  the record-shape differences where it does.
+
+Start with the checker, which reads your manifest and scans your Lua against
+the adapter's own coverage table:
+
+```sh
+python3 tools/modkit.py gen2check mods/my_mod
 ```
 
 ## Editing maps in Tiled
@@ -34,6 +57,24 @@ Open `build/tiled/gen1.tiled-project`, edit any of the 222 maps (or
 An edited vanilla map becomes a `mod.content.maps:patch` carrying only the
 fields that moved; a new map becomes a `:register`. See
 `docs/new-features.md` and the extension's own README.
+
+## Read-only map overviews
+
+`mod.world:mapOverview()` returns collision `rows` at map-cell resolution,
+optional visual `tileRows` at 2x resolution, and optional `tileDetailRows` at
+4x resolution. Visual rows contain Game Boy shades from `"0"` (lightest) to
+`"3"` (darkest); their matching width and height fields describe the grid.
+`markers` contains active `{ kind, x, y }` points in map-cell coordinates for
+`warp`, visible `item`, and untaken `hidden` locations. All fields are
+read-only snapshots; mods choose which layers to render.
+
+## Party ordering
+
+Companion UIs and alternate party screens can call
+`mod.world:canReorderParty()` before offering a reorder action, then
+`mod.world:reorderParty(fromSlot, toSlot)` with one-based party slots. The
+operation is accepted only during idle overworld play; menus, movement,
+scripts, battles, and transitions leave the party untouched.
 
 ## Rendering pipelines
 
@@ -100,6 +141,44 @@ Three rules worth knowing:
 Returning `nil` from `drawWorld` is a normal answer meaning "not this
 frame"; the engine draws the vanilla world instead.
 
+## Variable-size overworld sprites
+
+The `sprites` registry keeps the vanilla 16x16 grounded walker as its default,
+but a mod can describe any frame rectangle and anchor for player characters,
+NPCs, followers, mounts, vehicles, bosses, or other field actors:
+
+```lua
+mod.content.sprites:register("SPRITE_COMPANION", {
+  image = "mods/example/companion.png", -- one frame per row
+  frames = 6,
+  walker = true,
+  frameWidth = 32,
+  frameHeight = 32,
+  anchorX = 16, -- frame-relative bottom-center anchor
+  anchorY = 32,
+})
+```
+
+`frameWidth` and `frameHeight` are sheet pixels. `anchorX` and `anchorY` are
+measured from each frame's top-left; when omitted they default to the frame's
+horizontal center and bottom edge, so a larger sprite grows upward while its
+feet stay on the same world cell. Omitting all four fields is exactly the
+vanilla 16x16 placement. The normal player/NPC/follower draw paths consume
+these values automatically, including horizontal flips and the fishing pose.
+
+Custom render pipelines can use the same geometry without reproducing the
+pose rules:
+
+```lua
+local geometry = sprite:getPoseGeometry(facing, walkPhase, stepFlip)
+-- geometry.quad, .x/.y/.width/.height, .anchorX/.anchorY, .mirror
+local originX, originY = sprite:getScreenOrigin(px, py, camX, camY)
+```
+
+`getFrameGeometry(frame)` is the corresponding accessor for a specific
+zero-based sheet frame. Both accessors return fresh tables and share the
+renderer’s frame selection and mirror conventions.
+
 ## Battle sprite scaling
 
 The enemy's front pic draws at 1x and the player's back pic at 2x, the way
@@ -160,7 +239,18 @@ local deleted, code, message = mod.storage:delete(game, "history/quick/q0001")
 
 `context` returns `{ engineVersion, gameVersion, playthroughId }`. The engine
 version is compatibility metadata; physical launcher-slot and path identity stays
-private.
+private. A title-selected context may additionally contain `normalSavedAt`, the
+validated matching ordinary-save chronology only; it never exposes normal-save
+progress or a slot/path handle.
+
+At the title screen only, `mod.storage:selected(game)` returns a bound storage
+facade for the launcher-selected existing playthrough, or `nil, code, message`.
+Resolving this facade is read-only: it never allocates an identity, adopts a
+fresh New Game, or exposes a slot id/path. Its `context()`, `read(key)`,
+`write(key, value)`, `list(prefix)`, and `delete(key)` methods have the same
+data-only and transaction contract as `mod.storage`, but remain restricted to
+the calling mod's selected existing namespace. It is intended for title tools
+that need to browse or manage durable history before the first normal SAVE.
 
 Values must be tables containing serializable data only. Keys are conservative
 slash-separated segments (letters, digits, `_`, `-`); paths and filesystem
@@ -179,13 +269,21 @@ if capability.canCapture then
 end
 
 local ok, code, message = mod.checkpoints:restore(game, checkpoint)
+
+-- After the tool has durably committed its first checkpoint, make a
+-- never-saved playthrough reachable through ordinary title boot exactly once.
+local anchored, anchorCode, anchorMessage =
+  mod.checkpoints:ensureNormalSave(game, checkpoint)
 ```
 
 Checkpoint format 1 supports settled overworld control and proven battle
-player-decision safe points. Battle checkpoints are limited to ordinary
-single-player wild/trainer origins with no suspended script; link, Safari,
-ghost, demo, scripted, animation, message, queue, and forced-action phases fail
-closed. New checkpoints preserve gameplay RNG, while legacy overworld records
+player-decision safe points. Ordinary single-player wild/trainer encounters are
+supported. Scripted story battles are also supported when the engine can detach
+their current built-in battle command and data-only row continuation, rebind any
+NPC by stable id, and resume the story through a fresh runner. The suspended Lua
+coroutine is never serialized. Link, Safari, ghost, demo, opaque callback,
+non-data-only script, animation, message, queue, concurrent-script, and
+forced-action phases fail closed. New checkpoints preserve gameplay RNG, while legacy overworld records
 without RNG remain loadable. Capture excludes global options and runtime
 objects. Restore validates format, game/playthrough identity, content,
 coordinates, battle relationships, continuation, and RNG before mutation;
@@ -194,7 +292,65 @@ effects; verifies a recapture; and rolls back runtime plus RNG in memory if
 reconstruction fails. Callers that need crash recovery should durably capture
 their own recovery checkpoint before restore.
 
-See RFC 0003, RFC 0004, and RFC 0005 for exact contracts and error codes.
+Checkpoint ownership follows the persistence model rather than mod identity:
+
+- canonical `game.save` progress, including every mod's `save.modData` /
+  `mod.save` bucket and data-only fields added to saved Pokémon, rewinds;
+- global and per-mod options remain at their current values;
+- independently written `mod.storage` records do not rewind; and
+- mod-owned runtime objects, references, and caches are never serialized.
+
+Successful restore emits `checkpoint.restored` only after reconstruction and
+differential recapture have committed. Mods that cache rewound progress or hold
+references to reconstructed runtime objects can re-read their own public state
+and rebuild at that point:
+
+```lua
+mod.events:on("checkpoint.restored", function(ev)
+  -- ev.kind is "overworld" or "battle"; ev.game is fully reconstructed.
+  cachedQuestStage = mod.save:get("quest_stage", 0)
+  rebuildRuntimeFor(ev.game, ev.kind)
+end)
+```
+
+The event is not emitted for validation failure, failed reconstruction, or a
+successful rollback. Its payload contains no checkpoint data or other mod's
+private state. A mod that deliberately stores progress-coupled truth in
+`mod.storage` must version and reconcile that relationship itself; the engine
+cannot distinguish it safely from independent history, configuration, or cache
+data.
+
+`mod.checkpoints:resume(game, checkpoint)` is the title-session counterpart to
+live `restore`. It validates the same data-only checkpoint against the
+engine-selected existing playthrough, reconstructs only after all validation
+passes, preserves current options, and verifies by recapture. A title session
+has no live gameplay rollback state: if reconstruction or verification fails,
+the engine rebuilds a usable title session and returns `false, code, message`.
+It never rewrites a normal Pokémon save. It is unavailable outside title and does
+not broaden capture or arbitrary-frame support.
+
+`mod.checkpoints:ensureNormalSave(game, checkpoint)` is a separate live-runtime
+operation for durable checkpoint tools. It creates ordinary progress only when
+none exists, only after validating that the supplied checkpoint is the exact
+current safe runtime, and through the normal atomic save lifecycle. Once an
+ordinary save exists it returns `true, "already_exists"` without writing, so
+subsequent checkpoints and the player's later SAVE commands remain independent.
+Call it only after the tool's own checkpoint/index commit; treat an anchoring
+failure as a failed first checkpoint rather than claiming restart safety.
+See RFC 0003, RFC 0004, RFC 0005, and RFC 0006 for exact contracts and error
+codes.
+
+At that same settled supported wild/trainer decision boundary, a tool may claim
+START through `battle.menu_auxiliary`. It receives `(next, game, context)`, where
+`context` is the data-only `{ kind = "wild" }` or `{ kind = "trainer" }`; it
+never receives the live battle controller. Return `true` to consume START after
+opening source-owned UI, or call `next(game, context)` to allow lower-priority
+handlers. With no handler, START remains inert. Ordinary encounters and the
+validated built-in scripted battle origins described by RFC 0005 are eligible;
+opaque scripts, link/Safari/ghost/demo battles, action queues,
+animation/messages, forced choices, and every phase that cannot safely be
+checkpointed remain excluded. Exceptions are contained by normal hook isolation
+and fall through without advancing a turn.
 
 ## Developer console
 
@@ -290,5 +446,101 @@ update and input ownership, so a mod can mirror a native menu on another
 display without reimplementing it. The default is `true`. Treat the wrapper as
 a pure predicate: the renderer may ask it more than once per frame.
 
+Scrollable list states expose `state.kind` for use with this hook. Generic
+lists fall back to their title; PC lists use stable, localization-independent
+identifiers: `pc_box_withdraw`, `pc_box_deposit`, `pc_box_release`,
+`pc_box_change`, `pc_item_withdraw`, `pc_item_deposit`, and `pc_item_toss`.
+
+`battle.bottom_ui_visible` and `battle.status_hud_visible` independently
+control the battle text/menu layer and the HP/status panels. Both receive
+`(next, state)` and default to `true`, so vanilla rendering is unchanged.
+Text boxes and YES/NO prompts pushed above a battle inherit a `false` result
+for that battle, so hiding the bottom layer cannot leave their white backing
+behind under another overlay. Text boxes also pass through the hook as their
+own state, preserving selective control outside a battle; a wrapper that only
+owns battle presentation should return `false` only for its active battle or
+text-box state.
+
+`core.logic_speed` receives `(next, game)` once per `Game:logicSpeed()` call
+(once per frame). Vanilla behavior resolves the per-category GAME SPEED
+option (`GameSpeed.CATEGORIES`: overworld/battle/menu) for whichever
+category `Game.speedCategoryInStack` says is active right now. A mod may
+call `next(game)` and return its result to pass that resolution through, or
+return a different number outright to override it for that frame (a bot mod
+forcing 1X for one route segment, say, regardless of the category or saved
+option). The result is clamped to the nearest valid `GameSpeed.LEVELS` entry
+regardless of what a subscriber returns, so a bad value (0, negative, `nil`)
+cannot destabilize the fixed-step accumulator. This hook runs *after* link
+play's 1X lock and the `--speed`/equivalent run-argument override, both of
+which stay unconditional and are never visible to a subscriber.
+
 Developer mode also arms the mod loader's dev tripwire, which flags mods
 that reach outside their permission set.
+
+## Process-lifecycle hooks
+
+These exist so a platform-specific launcher integration (a native shell
+that embeds this engine and wraps its window in platform UI) can live
+entirely in a mod instead of hand-patching `main.lua`, which every other
+engine change also touches.
+
+`core.update` receives `(next, game, dt)` once per frame from
+`love.update`. Vanilla behavior is `game:update(dt)`, unconditionally. A
+mod may skip calling `next(game, dt)` to pause the simulation for that
+frame (e.g. while a native settings sheet is on top), and may run
+additional per-frame polling before or after that call regardless of
+whether it calls `next` -- useful for one-shot flags that must be observed
+every frame even while paused.
+
+`core.quit_to_launcher` receives `(next)` once from `love.quit()`. `next()`
+returns the engine's own decision for whether closing the window should
+return to the Lua launcher instead of exiting; a mod may return `false`
+outright, without ever calling `next`, to veto that and let the process
+really quit -- for a platform host that owns its own "return to launcher"
+UI and would otherwise get looped straight back into the game it just
+quit.
+
+A manifest may also declare `force_enable_env`, an environment variable
+name that re-enables the mod regardless of a saved disable in
+`options.mods` when that variable is set to `"1"`. This is for a mod that
+cannot function disabled on the one build where its env var is set (a
+platform-bridge mod bundled only with that build's launcher, for example).
+
+Neither hook needs a `Runtime.wantsHook` guard before calling it: `Hooks:call`
+already falls straight through to the vanilla function when no mod has
+wrapped the name, at negligible cost.
+
+## Detached Pokémon icon presentation
+
+`mod.ui.PokemonIcon.draw(game, summary, x, y, opts)` draws the same party icon
+the native Party menu would resolve without exposing a live Pokémon record or
+the private Party menu. `summary` is the detached data-only shape
+`{ species = string, hp = integer, maxHp = integer }`; `opts.selected` and
+`opts.counter` optionally request the native selected-icon animation phase.
+
+The engine retains icon ownership. Content registered through
+`mod.content.icons`, species `icon` definitions, asset overrides, and the
+public `pokemon.icon` hook therefore continue to compose. Invalid summaries
+return `false, code, message` and draw nothing. The helper is presentation
+only: it does not expose moves, status, checkpoint payloads, or mutable party
+state.
+
+## Shared date and time presentation
+
+The global Options menu owns `DATE FORMAT` (`DEVICE`, `DD-MM-YYYY`,
+`MM-DD-YYYY`, `YYYY-MM-DD`) and `TIME FORMAT` (`DEVICE`, `24 HOUR`, `12 HOUR`).
+These preferences live in `options.lua`, so checkpoint restore never rewinds
+them. `DEVICE` uses the process time locale when the platform provides one;
+the portable fallback is `DD-MM-YYYY` plus 24-hour time.
+
+Mods format captured timestamps through the read-only public facade:
+
+```lua
+local date = mod.datetime:date(game, createdAt)
+local time = mod.datetime:time(game, createdAt)
+local both = mod.datetime:dateTime(game, createdAt)
+```
+
+The live `game` supplies only the current option context. Formatting never
+mutates the save, options, or timestamp, and invalid timestamps return
+`"----"`.

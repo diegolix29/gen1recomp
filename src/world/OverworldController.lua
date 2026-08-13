@@ -50,6 +50,35 @@ local function rotateDirection(dir, angleDeg)
   local newIdx = ((idx - 1 + steps) % 4) + 1
   return dirs[newIdx]
 end
+-- pokered's wNumberOfNoRandomBattleStepsLeft: three completed steps
+-- after a wild battle before another random battle can start.
+local WILD_ENCOUNTER_GRACE_STEPS = 3
+
+-- Fly animation coord paths (engine/overworld/player_animations.asm):
+-- y/x pairs in GB screen pixels, one pair every 3 frames (DoFlyAnimation's
+-- Delay3).  The port anchors a path on the player's own position instead
+-- of the GB screen center: FLY_ANCHOR is the pair where the original has
+-- the player's sprite, so path1 starts exactly on the player.
+local FLY_ANCHOR = { 0x3C, 0x48 }
+local FLY_PATH1 = { -- FlyAnimationScreenCoords1: up and off to the right
+  { 0x3C, 0x48 }, { 0x3C, 0x50 }, { 0x3B, 0x58 }, { 0x3A, 0x60 },
+  { 0x39, 0x68 }, { 0x37, 0x70 }, { 0x37, 0x78 }, { 0x33, 0x80 },
+  { 0x30, 0x88 }, { 0x2D, 0x90 }, { 0x2A, 0x98 }, { 0x27, 0xA0 },
+}
+local FLY_PATH2 = { -- FlyAnimationScreenCoords2: out over the top-left;
+  -- the 11th step reads the ($F0,$00) terminator, fully off screen
+  { 0x1A, 0x90 }, { 0x19, 0x80 }, { 0x17, 0x70 }, { 0x15, 0x60 },
+  { 0x12, 0x50 }, { 0x0F, 0x40 }, { 0x0C, 0x30 }, { 0x09, 0x20 },
+  { 0x05, 0x10 }, { 0x00, 0x00 }, { -16, 0x00 },
+}
+-- FlyAnimationEnterScreenCoords: in from off the top-right.  Its own last
+-- pair is ($3C,$40), so the arrival anchors there and lands on the player.
+local FLY_ARRIVE_ANCHOR = { 0x3C, 0x40 }
+local FLY_PATH_IN = {
+  { 0x05, 0x98 }, { 0x0F, 0x90 }, { 0x18, 0x88 }, { 0x20, 0x80 },
+  { 0x27, 0x78 }, { 0x2D, 0x70 }, { 0x32, 0x68 }, { 0x36, 0x60 },
+  { 0x39, 0x58 }, { 0x3B, 0x50 }, { 0x3C, 0x48 }, { 0x3C, 0x40 },
+}
 
 -- healing machine ball screen positions (PokeCenterOAMData dbsprite
 -- rows are raw shadow-OAM bytes, so the hardware's -8/-16 OAM origin
@@ -69,8 +98,10 @@ local HEAL_FLASH_MAP = { [0] = 0, [1] = 2, [2] = 1, [3] = 3 }
 -- above (screen = tile*8 + pixel - 8/16), measured against the player
 -- sprite's fixed screen spot: ResetPlayerSpriteData parks it at $3c/$40
 -- (home/reset_player_sprite.asm), i.e. screen (64,60).  So what ports over
--- is the delta from the sprite's top-left, which SpriteRenderer:draw puts at
--- (px, py - 4).  `tile` indexes the three stacked 8x8 tiles of
+-- is the delta from the sprite's top-left, which the vanilla
+-- SpriteRenderer:draw puts at (px, py - 4); custom frame anchors move that
+-- origin while keeping these offsets frame-relative.  `tile` indexes the
+-- three stacked 8x8 tiles of
 -- assets/generated/fx/fishing_rod.png: FishingRodOAM only ever draws $fd
 -- (row 0, up/down) and $fe (row 1, left/right), and RIGHT is the LEFT tile
 -- x-flipped.  Blitting the whole 8x24 sheet is what drew the rod as a
@@ -212,6 +243,8 @@ function OverworldState:enter(mapId, x, y, facing, opts)
   -- a fresh entry, or a stale flag can freeze player input forever
   self.engaging = false
   self.emote = nil
+  -- volatile WRAM state in pokered; never serialize across save/load
+  self.wildEncounterGraceSteps = 0
   -- survives save/load: a loaded game may start inside a building whose
   -- exit mat is a LAST_MAP warp
   self.lastOutdoor = Game.save.lastOutdoor
@@ -426,14 +459,27 @@ function OverworldState:setMap(mapId, x, y, facing, opts)
   -- walks out of the warp, not beside him (#863)
   require("src.world.PikachuFollower").onMapEntered(Game, self, opts, true)
 
-  -- opts.keepMusic: the Oak-escort warp keeps MUSIC_MEET_PROF_OAK
-  -- playing into the lab (BIT_NO_MAP_MUSIC in wStatusFlags7);
-  -- keepMusicOnce is the play_music opts.keep one-shot of the same bit
+  -- opts.keepMusic preserves the Oak-escort song across the lab warp,
+  -- matching BIT_NO_MAP_MUSIC: MUSIC_MUSEUM_GUY in Yellow and
+  -- MUSIC_MEET_PROF_OAK in Red/Blue. keepMusicOnce is the equivalent
+  -- one-shot set by play_music opts.keep.
   local keepMusic = (opts and opts.keepMusic) or self.keepMusicOnce
   self.keepMusicOnce = nil
   if not keepMusic then
-    require("src.core.Music").playMap(Game.data, mapId, Game.save.onBike,
-                                      self.player.surfing)
+    -- ..(home/overworld.asm ln 2346)
+    local Music = require("src.core.Music")
+    -- opts.freshBoot: switch instantly instead of cross-fading, like every
+    -- other map's PlayDefaultMusic on real hardware -- set only by
+    -- Game.lua's hard state teleports (onContinue, New Game, F2,
+    -- restoreCheckpointSave). Deliberately separate from opts.via ==
+    -- "boot" itself: dev tooling (src/dev/Console.lua's warp verb,
+    -- src/dev/HotReload.lua's reloadMap) reuses that same default for the
+    -- surf-restore/fresh-npc-pool branches above and must keep the
+    -- ordinary crossfade.
+    local fade = Music.MAP_FADE
+    if opts and opts.freshBoot then fade = nil end
+    Music.playMap(Game.data, mapId, Game.save.onBike, self.player.surfing,
+                  fade)
   end
 
   -- forced bike/surf tiles fire the moment the player is placed on the
@@ -1079,8 +1125,10 @@ function OverworldState:update(dt)
     local mapId = self.pendingSeamMusic
     self.pendingSeamMusic = nil
     if mapId == self.map.id then
-      require("src.core.Music").playMap(Game.data, mapId, Game.save.onBike,
-                                        self.player.surfing)
+      -- ..(home/overworld.asm ln 677)
+      local Music = require("src.core.Music")
+      Music.playMap(Game.data, mapId, Game.save.onBike, self.player.surfing,
+                    Music.MAP_FADE)
     end
   end
   if stepped and not scripted then
@@ -1208,7 +1256,7 @@ function OverworldState:handleInput()
         if self:checkLedgeHop(rotatedDir) then return end
         if self:checkBoulderPush(rotatedDir) then return end
       end
-      local result, why = self.player:tryMove(rotatedDir, self.map, self.entities)
+      local result = self.player:tryMove(dir, self.map, self.entities)
       -- a collision while standing on a warp square fires the warp when the
       -- extra check passes (CheckWarpsCollision: route-gate doorways, dock
       -- entrances, ...), and only while BIT_STANDING_ON_WARP is set (issue
@@ -1221,7 +1269,9 @@ function OverworldState:handleInput()
           return result
         end
       end
-      if result == "blocked" and why ~= "entity" then
+      -- CollisionCheckOnLand (home/overworld.asm): a sprite takes the same
+      -- .collision branch as an impassable tile (#960)
+      if result == "blocked" then
         if (self.bumpCooldown or 0) <= 0 then
           require("src.core.Sound").play(Game.data, "Collision")
           self.bumpCooldown = 16
@@ -1358,14 +1408,16 @@ function OverworldState:checkLedgeHop(dir)
           return false
         end
         require("src.core.Sound").play(Game.data, "Ledge")
-        p.hopFrames, p.hopTotal = 32, 32 -- jump arc (cosmetic)
+        local hop = (p.stepFramesCur or p.stepFrames or 16) * 2
+        p.hopFrames, p.hopTotal = hop, hop -- jump arc (cosmetic)
         self:scriptMove(p, dir, 1, function() self:checkEdgeExit(dir) end)
         return true
       end
       if not Collision.occupied(self.entities, lx, ly, p)
          and self.map:isWalkableCell(lx, ly) then
         require("src.core.Sound").play(Game.data, "Ledge")
-        p.hopFrames, p.hopTotal = 32, 32 -- jump arc (cosmetic)
+        local hop = (p.stepFramesCur or p.stepFrames or 16) * 2
+        p.hopFrames, p.hopTotal = hop, hop -- jump arc (cosmetic)
         self:scriptMove(p, dir, 2)
         return true
       end
@@ -2012,7 +2064,8 @@ function OverworldState:tryHiddenObject(fx, fy)
         -- SOMEONE'S/BILL'S PC main menu (DisplayPCMainMenu).  Every other
         -- pcTile is a Pokémon Center-style PC that shows the multi-PC menu. (#228)
         require("src.core.Sound").play(Game.data, "Turn_On_PC")
-        Screens.push(Game, "PlayerPC")
+        -- direct access: ExitPlayerPC rings SFX_TURN_OFF_PC (players_pc.asm, #960)
+        Screens.push(Game, "PlayerPC", { direct = true })
       else
         self:openPC()
       end
@@ -2718,6 +2771,8 @@ function OverworldState:openPC(onDone)
     label = (Game.save.player.name or "RED") .. "'s PC",
     keepOpen = true,
     onSelect = function()
+      -- pc.asm .playersPC plays SFX_ENTER_PC before the farcall (#960)
+      require("src.core.Sound").play(Game.data, "Enter_PC")
       Screens.push(Game, "PlayerPC")
       done()
     end,
@@ -2729,6 +2784,8 @@ function OverworldState:openPC(onDone)
       label = Strings("PROF.OAK's PC"),
       keepOpen = true,
       onSelect = function()
+        -- pc.asm OaksPC plays SFX_ENTER_PC before the farcall (#960)
+        require("src.core.Sound").play(Game.data, "Enter_PC")
         self:openOaksPC(done)
       end,
     })
@@ -2912,17 +2969,29 @@ function OverworldState:nurseHeal(onDone, npc)
           -- line: it comes back on the counter facing the player
           Follower.setVisible(self, true)
           if npc then npc:facePlayer(self.player) end
-          self:finishNurseHeal(bye, onDone)
+          self:finishNurseHeal(bye, onDone, npc)
         end
       end))
     end)
   end }))
 end
 
-function OverworldState:finishNurseHeal(bye, onDone)
+-- pokecenter.asm bows the nurse between the two PrintText calls (#995)
+function OverworldState:finishNurseHeal(bye, onDone, npc)
   local t = Game.data.text
   local fit = t._PokemonFightingFitText or Strings("Your POKéMON are\nfighting fit!")
-  Game.stack:push(TextBox.new(Game, fit .. "\f" .. bye, onDone))
+  Game.stack:push(TextBox.new(Game, fit, function()
+    local function farewell()
+      Game.stack:push(TextBox.new(Game, bye, function()
+        if npc then npc:facePlayer(self.player) end
+        if onDone then onDone() end
+      end))
+    end
+    if not npc then farewell() return end
+    npc.facing = "up"
+    -- bubble = false is the silent world hold, this port's DelayFrames
+    self.emote = { npc = npc, frames = 20, bubble = false, onDone = farewell }
+  end))
 end
 
 -- The Cable Club link receptionist (TX_SCRIPT_CABLE_CLUB_RECEPTIONIST ->
@@ -3348,6 +3417,7 @@ function OverworldState:showMapText(textConst, npc, onDone)
     -- the winning contribution's rows run as their owner (09 §4.4): mod:
     -- field routing, strict dispatch and error reports all read the source
     self.runner:run(script, { npc = npc, onDone = onDone,
+      checkpointOnDone = onDone and "release_npc" or nil,
       source = mapScripts.talkSource(self.map.id, textConst) })
     return
   end
@@ -3457,6 +3527,21 @@ end
 
 function OverworldState:onStepComplete()
   local p = self.player
+  -- Defaulted: a state built without the constructor (a mod harness, a test
+  -- fixture) reaches this before :234 ever ran, and nil > 0 threw the step.
+  local grace = self.wildEncounterGraceSteps or 0
+  if grace > 0 then
+    self.wildEncounterGraceSteps = grace - 1
+  end
+  -- TryDoWildEncounter's first guard is `ld a, [wNPCMovementScriptPointerTable
+  -- Num] / and a / ret nz` (engine/battle/wild_encounters.asm:3-9): a step the
+  -- player did not take never rolls, which is why Oak's escort walks to the lab
+  -- through Pallet's grass without being jumped.
+  local runner = self.runner
+  local scripted = (runner and runner.isRunning and runner:isRunning())
+    or #(self.scriptMoves or {}) > 0
+    or self.engaging or self.emote or self.teleportOut
+  local suppressWildEncounter = grace > 0 or scripted and true or false
   self.todSteps = (self.todSteps or 0) + 1
   -- UpdatePikachuHappinessAndMood rides the step counter (poison.asm)
   require("src.world.PikachuFollower").onStep(Game.save)
@@ -3569,6 +3654,9 @@ function OverworldState:onStepComplete()
   -- wild encounters in grass, on water while surfing, or -- on indoor
   -- maps whose tileset is not FOREST -- on EVERY tile
   -- (wild_encounters.asm: caves, towers, the Mansion, Power Plant)
+  -- The cooldown is checked after all other step processing so repel and
+  -- movement systems continue to advance during the protected steps.
+  if suppressWildEncounter then return end
   local encDef = Game.data.encounters[self.map.id]
   local enc
   local indoor = Game.data.field.indoorEncounters
@@ -3955,6 +4043,9 @@ end
 -- battle is optional; when given, Oak's Lab OPP_RIVAL1 losses skip the
 -- blackout (pret HandlePlayerBlackOut) so the map script can HealParty.
 function OverworldState:afterBattle(result, battle)
+  if battle and battle.kind == "wild" then
+    self.wildEncounterGraceSteps = WILD_ENCOUNTER_GRACE_STEPS
+  end
   local lead = Game.save.party[1]
   Logger.info("battle over: %s (lead %s %d/%d)", tostring(result),
               lead and lead.species or "-", lead and lead.hp or 0,
@@ -4008,6 +4099,30 @@ function OverworldState:restoreBattleContinuation(battle, origin)
   end
   if origin.kind == "wild_encounter" and battle.kind == "wild" then
     battle.onFinish = function(result) self:afterBattle(result, battle) end
+    return true
+  end
+  if origin.kind == "script_battle" then
+    if origin.battleKind ~= battle.kind
+        or (battle.kind == "trainer" and (origin.trainerClass ~= battle.oppClass
+          or origin.partyIndex ~= (battle.partyIndex or 1)))
+        or type(origin.script) ~= "table" or type(origin.pc) ~= "number" then
+      return false
+    end
+    local npc = origin.npcId and self.npcPool and self.npcPool[origin.npcId] or nil
+    if origin.npcId and not npc then return false end
+    battle.onFinish = function(result)
+      local runner = self.runner
+      if not runner or runner:isRunning() then
+        runner = ScriptRunner.new(game, self)
+        self.runner = runner
+      end
+      runner:run(origin.script, {
+        npc = npc,
+        source = origin.source,
+        resumeBattle = { result = result, battle = battle },
+      }, origin.pc)
+    end
+    battle.checkpointScriptContinuation = true
     return true
   end
   if origin.kind ~= "trainer_encounter" or battle.kind ~= "trainer"
@@ -4178,6 +4293,14 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
   self.doorWarp = nil
   local arriveWarp = self.arriveWarp
   self.arriveWarp = nil
+  -- PlayMapChangeSound (home/overworld.asm) plays before the tail-called
+  -- GBFadeOutToBlack, so the SFX starts with the fade (#961)
+  if doorWarp then
+    local dest = Game.data.maps[mapId]
+    local outdoor = dest and Map.isOutdoor(dest)
+    require("src.core.Sound").play(Game.data,
+                                   outdoor and "Go_Outside" or "Go_Inside")
+  end
   Game.stack:push(Transition.new(Game, function()
     self:setMap(mapId, x, y, facing or "down", opts)
     -- the departure-side hide from flyAnim/teleportOut ends here, on the new
@@ -4210,9 +4333,6 @@ function OverworldState:startWarpTo(mapId, x, y, facing, onDone, opts)
       self.player.spinDrop = true
     end
     if doorWarp then
-      local outdoor = Map.isOutdoor(self.map.def)
-      require("src.core.Sound").play(Game.data,
-                                     outdoor and "Go_Outside" or "Go_Inside")
       -- PlayerStepOutFromDoor (engine/overworld/auto_movement.asm): any
       -- warp that lands on a door tile auto-steps south once, indoor or
       -- outdoor. Auto-walk leaves the mat, so the arrival disable
@@ -4760,9 +4880,15 @@ function OverworldState:drawWorld()
           end
         end
         local quad = self.rodQuads[oam.tile]
-        -- the sprite's top-left is 4px above its cell (SpriteRenderer:draw)
-        local rx = p.px - cam.x + oam.dx
-        local ry = p.py - cam.y - 4 + oam.dy
+        -- Place the rod against the active sprite's anchored top-left.  The
+        -- vanilla result is still (px-cam, py-cam-4), while custom larger
+        -- sheets keep the rod attached to their feet.
+        -- Fishing always uses the on-foot player sheet; read its fields
+        -- directly so this FX pass does not advance pose-side animation.
+        local sprite, px, py = p.sprite, p.px, p.py
+        local sx, sy = sprite:getScreenOrigin(px, py, cam.x, cam.y)
+        local rx = sx + oam.dx
+        local ry = sy + oam.dy
         love.graphics.setColor(1, 1, 1, 1)
         if quad and oam.flip then
           love.graphics.draw(self.rodImg, quad, rx + 8, ry, 0, -1, 1)

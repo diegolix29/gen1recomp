@@ -6,6 +6,8 @@ local SaveData = require("src.core.SaveData")
 local Version = require("src.core.Version")
 local BattleState = require("src.battle.BattleState")
 local BattleCheckpoint = require("src.core.BattleCheckpoint")
+local ModRuntime = require("src.mods.Runtime")
+local BattleSafety = require("src.battle.BattleSafety")
 
 local Checkpoint = {}
 
@@ -35,61 +37,9 @@ local function scriptsBusy(ow)
     or nonempty(ow.scriptMoves)
 end
 
-local BATTLE_BUSY_FIELDS = {
-  "current", "afterQueue", "nextInsert", "pendingHit", "waitingUI",
-  "waitingSound", "waitFrames", "draining", "animPlaying", "growIn",
-  "introSlide", "ghostReveal", "mimicCtx", "mimicMoves", "result",
-}
-
-local function inspectBattle(ow, battle)
-  if battle.kind == "link" then
-    return refusal("battle", "link_battle_unsupported",
-      "Network battles cannot be checkpointed.")
-  end
-  if battle.safari or battle.ghost or battle.scopeReveal or battle.demo
-      or battle.noCatch then
-    return refusal("battle", "battle_variant_unsupported",
-      "This battle variant does not have a checkpoint contract.")
-  end
-  if battle.kind ~= "wild" and battle.kind ~= "trainer" then
-    return refusal("battle", "battle_variant_unsupported",
-      "This battle kind does not have a checkpoint contract.")
-  end
-  local origin = battle.checkpointOrigin
-  local expectedOrigin = battle.kind == "wild" and "wild_encounter"
-    or "trainer_encounter"
-  if type(origin) ~= "table" or origin.kind ~= expectedOrigin then
-    return refusal("battle", "battle_origin_unsupported",
-      "The battle completion path cannot be reconstructed safely.")
-  end
-  if scriptsBusy(ow) then
-    return refusal("battle", "script_busy",
-      "A suspended or queued script cannot be checkpointed.")
-  end
-  if battle.phase ~= "menu" or nonempty(battle.queue) then
-    return refusal("battle", "battle_phase_busy",
-      "Wait for the player command menu before creating a checkpoint.")
-  end
-  for _, field in ipairs(BATTLE_BUSY_FIELDS) do
-    if battle[field] ~= nil and battle[field] ~= false then
-      return refusal("battle", "battle_phase_busy",
-        "Wait for the current battle action to finish.")
-    end
-  end
-  if not battle.player or not battle.enemy or battle.player.mon.hp <= 0
-      or (battle.menuLockedAction and battle:menuLockedAction(battle.player)) then
-    return refusal("battle", "battle_phase_busy",
-      "Wait for an ordinary player decision before creating a checkpoint.")
-  end
-  for _, battler in ipairs({ battle.player, battle.enemy }) do
-    if battler.shownHP ~= battler.mon.hp
-        or battler.shownStatus ~= battler.mon.status
-        or battler.drainFloor ~= nil or battler.drainHold ~= nil
-        or battler.faintQueued then
-      return refusal("battle", "battle_phase_busy",
-        "Wait for battle status and HP presentation to settle.")
-    end
-  end
+local function inspectBattle(game, battle)
+  local allowed, reason, message = BattleSafety.inspect(game, battle)
+  if not allowed then return refusal("battle", reason, message) end
   return { canCapture = true, canRestore = true, kind = "battle" }
 end
 
@@ -108,7 +58,7 @@ function Checkpoint.inspect(game)
   end
   local top = game.stack and game.stack.top and game.stack:top()
   if getmetatable(top) == BattleState then
-    return inspectBattle(ow, top)
+    return inspectBattle(game, top)
   end
   if top ~= ow then
     return refusal("overworld", "screen_busy",
@@ -245,7 +195,7 @@ end
 
 local FACINGS = { up = true, down = true, left = true, right = true }
 
-local function validate(game, checkpoint)
+local function validate(game, checkpoint, expectedIdentity)
   if type(checkpoint) ~= "table" then
     return nil, "invalid_checkpoint", "Checkpoint root must be a table."
   end
@@ -263,13 +213,16 @@ local function validate(game, checkpoint)
   end
   local identity = copy.identity
   local current = game and game.save
-  local currentId = current and current.meta and current.meta.playthroughId
+  local currentId = expectedIdentity and expectedIdentity.playthroughId
+    or (current and current.meta and current.meta.playthroughId)
+  local currentVersion = expectedIdentity and expectedIdentity.gameVersion
+    or (current and current.version)
   if type(identity) ~= "table" or type(identity.engineVersion) ~= "string"
       or type(identity.gameVersion) ~= "string"
       or type(identity.playthroughId) ~= "string" then
     return nil, "invalid_checkpoint", "Checkpoint identity is missing or corrupt."
   end
-  if identity.gameVersion ~= current.version then
+  if identity.gameVersion ~= currentVersion then
     return nil, "wrong_game", "Checkpoint belongs to another game version."
   end
   if identity.playthroughId ~= currentId then
@@ -360,6 +313,16 @@ local function equalData(a, b)
   return okA and okB and encodedA == encodedB
 end
 
+local function normalizeVerificationMetadata(actual, expected)
+  if type(actual) == "table" and type(actual.identity) == "table"
+      and type(expected) == "table" and type(expected.identity) == "table" then
+    -- RFC 0004 treats engineVersion as compatibility metadata, not runtime
+    -- state. A fresh recapture stamps the running engine, so normalize only
+    -- that metadata before differential verification.
+    actual.identity.engineVersion = expected.identity.engineVersion
+  end
+end
+
 local function firstDifference(a, b, path)
   path = path or "$"
   if type(a) ~= type(b) then return path .. " (type)" end
@@ -382,6 +345,49 @@ local function firstDifference(a, b, path)
   return nil
 end
 
+local emitRestored
+
+-- Persist the current verified checkpoint as the ordinary progress anchor only
+-- when this playthrough has never had one. This is intentionally idempotent:
+-- durable checkpoint tools can make a first session resumable without turning
+-- every later checkpoint into a hidden normal SAVE. The live runtime must still
+-- match the supplied checkpoint, and the ordinary save.write veto/lifecycle
+-- remains authoritative through Game:writeSave().
+function Checkpoint.ensureNormalSave(game, checkpoint, injectedFs)
+  local capability = Checkpoint.inspect(game)
+  if not capability.canCapture then
+    return false, capability.reason, capability.message
+  end
+  local validated, code, message = validate(game, checkpoint)
+  if not validated then return false, code, message end
+
+  local info, infoCode, infoMessage =
+    SaveData.selectedNormalSaveInfo(game.save, injectedFs)
+  if not info then return false, infoCode, infoMessage end
+  if info.exists then return true, "already_exists" end
+
+  local current, captureCode, captureMessage = Checkpoint.capture(game)
+  if not current then return false, captureCode, captureMessage end
+  if not equalData(current, validated) then
+    return false, "checkpoint_not_current",
+      "The active runtime changed after this checkpoint was captured."
+  end
+  if type(game.writeSave) ~= "function" then
+    return false, "save_unavailable",
+      "The active runtime cannot persist ordinary progress."
+  end
+  local ok, saved = pcall(game.writeSave, game)
+  if not ok or saved == false then
+    return false, "save_failed", "Could not create the first ordinary progress save."
+  end
+  local verified = SaveData.selectedNormalSaveInfo(game.save, injectedFs)
+  if type(verified) ~= "table" or not verified.exists then
+    return false, "save_verify_failed",
+      "The first ordinary progress save could not be verified."
+  end
+  return true
+end
+
 function Checkpoint.restore(game, checkpoint)
   local capability = Checkpoint.inspect(game)
   if not capability.canRestore then
@@ -398,7 +404,11 @@ function Checkpoint.restore(game, checkpoint)
   if ok then
     local restored, verifyCode = Checkpoint.capture(game)
     if restored and validated.rng == nil then restored.rng = nil end
-    if restored and equalData(restored, validated) then return true end
+    normalizeVerificationMetadata(restored, validated)
+    if restored and equalData(restored, validated) then
+      emitRestored(game, validated)
+      return true
+    end
     err = restored and ("restored state differed at "
       .. tostring(firstDifference(validated, restored) or "canonical encoding"))
       or ("restored state could not be captured: " .. tostring(verifyCode))
@@ -410,6 +420,87 @@ function Checkpoint.restore(game, checkpoint)
       "Checkpoint restore and rollback both failed: " .. tostring(rollbackErr)
   end
   return false, "restore_failed", "Checkpoint restoration failed: " .. tostring(err)
+end
+
+emitRestored = function(game, checkpoint)
+  if ModRuntime.wants("checkpoint.restored") then
+    ModRuntime.emit("checkpoint.restored", {
+      game = game,
+      kind = checkpoint.kind,
+    })
+  end
+end
+
+local function isTitleSession(game)
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" then return false end
+  for _, state in ipairs(states) do
+    if type(state) == "table" and state.screenId == "TitleState" then return true end
+  end
+  return false
+end
+
+local function rebuildTitle(game, savedTitle, rng)
+  local save, err = dataCopy(savedTitle)
+  if not save then error("title rollback decode failed: " .. tostring(err), 0) end
+  game.save = save
+  if type(game.adoptSave) == "function" then game:adoptSave(save) end
+  restoreRng(rng)
+  if not (game.stack and game.stack.top and game.stack.pop and game.stack.push
+      and type(game.makeTitleState) == "function") then
+    error("title recovery is unavailable", 0)
+  end
+  while game.stack:top() do game.stack:pop() end
+  game.stack:push(game:makeTitleState())
+end
+
+-- Reconstruct a validated persistent checkpoint from the title session. This
+-- is intentionally separate from restore(): title has no live gameplay state
+-- to capture for rollback. Validation happens before any mutation; a failed
+-- reconstruction rebuilds a fresh usable title session instead of exposing a
+-- half-installed overworld or battle.
+function Checkpoint.resume(game, checkpoint)
+  if not isTitleSession(game) then
+    return false, "not_at_title",
+      "Checkpoint resume is available only from the title session."
+  end
+  local save = game and game.save
+  local playthroughId, identityCode, identityMessage =
+    SaveData.selectedPlaythroughId(save)
+  if type(playthroughId) ~= "string" or playthroughId == "" then
+    return false, identityCode, identityMessage
+  end
+  local expected = { gameVersion = save and save.version, playthroughId = playthroughId }
+  local validated, code, message = validate(game, checkpoint, expected)
+  if not validated then return false, code, message end
+
+  local titleSave, titleErr = dataCopy(save)
+  if not titleSave then
+    return false, "title_recovery_unavailable",
+      "Could not preserve the title session: " .. tostring(titleErr)
+  end
+  local titleRng = captureRng()
+  local currentOptions = save.options
+  local ok, err = pcall(apply, game, validated, currentOptions)
+  if ok then
+    local restored, verifyCode = Checkpoint.capture(game)
+    if restored and validated.rng == nil then restored.rng = nil end
+    normalizeVerificationMetadata(restored, validated)
+    if restored and equalData(restored, validated) then
+      emitRestored(game, validated)
+      return true
+    end
+    err = restored and ("resumed state differed at "
+      .. tostring(firstDifference(validated, restored) or "canonical encoding"))
+      or ("resumed state could not be captured: " .. tostring(verifyCode))
+  end
+
+  local recovered, recoveryErr = pcall(rebuildTitle, game, titleSave, titleRng)
+  if not recovered then
+    return false, "title_recovery_failed",
+      "Checkpoint resume failed and title recovery failed: " .. tostring(recoveryErr)
+  end
+  return false, "resume_failed", "Checkpoint resume failed: " .. tostring(err)
 end
 
 return Checkpoint

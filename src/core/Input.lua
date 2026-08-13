@@ -2,6 +2,7 @@
 -- `down` = held this frame; `pressed` = edge, consumed per fixed step.
 
 local Input = {}
+local GamepadMap = require("src.core.GamepadMap")
 
 local DEFAULT_BINDINGS = {
   up = "up", w = "up",
@@ -213,6 +214,35 @@ function Input:reset()
   self.pendingStickHotkey = nil
   self.pendingRightStickHotkey = nil
   self.pendingTriggerHotkey = nil
+  self.hatDirs = {}
+  self.captureArmed = false
+  self.captureEvents = nil
+end
+
+function Input:armCapture()
+  self.captureArmed = true
+  self.captureEvents = {}
+end
+
+function Input:disarmCapture()
+  self.captureArmed = false
+  self.captureEvents = nil
+end
+
+function Input:takeCaptureEvents()
+  local ev = self.captureEvents
+  self.captureEvents = self.captureArmed and {} or nil
+  return ev
+end
+
+local function noteCapture(self, kind, phase, value)
+  if not self.captureArmed then return end
+  local ev = self.captureEvents
+  if not ev then
+    ev = {}
+    self.captureEvents = ev
+  end
+  ev[#ev + 1] = { kind = kind, phase = phase, value = value }
 end
 
 -- Multiple physical sources (W + Up, d-pad + stick, etc.) can claim the
@@ -248,6 +278,7 @@ local function release(self, btn, source)
 end
 
 function Input:keypressed(key)
+  noteCapture(self, "key", "pressed", key)
   local btn = self.keyBindings[key]
   if btn then
     press(self, btn, "key:" .. key)
@@ -255,6 +286,7 @@ function Input:keypressed(key)
 end
 
 function Input:keyreleased(key)
+  noteCapture(self, "key", "released", key)
   local btn = self.keyBindings[key]
   if btn then
     release(self, btn, "key:" .. key)
@@ -315,6 +347,7 @@ function Input:sourceRelease(btn, source)
 end
 
 function Input:gamepadpressed(joystick, button)
+  noteCapture(self, "pad", "pressed", button)
   local btn = self.padBindings[button]
   if btn then
     press(self, btn, "pad:" .. button)
@@ -322,6 +355,7 @@ function Input:gamepadpressed(joystick, button)
 end
 
 function Input:gamepadreleased(joystick, button)
+  noteCapture(self, "pad", "released", button)
   local btn = self.padBindings[button]
   if btn then
     release(self, btn, "pad:" .. button)
@@ -344,13 +378,15 @@ local function isRawStick(joystick)
 end
 
 function Input:joystickpressed(joystick, button)
-  if not isRawStick(joystick) then return end
+  if GamepadMap.ignoreRawForJoystick(joystick) then return end
+  noteCapture(self, "joy", "pressed", button)
   local btn = self.joyBindings[button]
   if btn then press(self, btn, "joy:" .. button) end
 end
 
 function Input:joystickreleased(joystick, button)
-  if not isRawStick(joystick) then return end
+  if GamepadMap.ignoreRawForJoystick(joystick) then return end
+  noteCapture(self, "joy", "released", button)
   local btn = self.joyBindings[button]
   if btn then release(self, btn, "joy:" .. button) end
 end

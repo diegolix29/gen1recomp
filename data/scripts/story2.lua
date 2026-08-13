@@ -206,6 +206,13 @@ M.PALLET_TOWN = {
     end
 
     local function escortToLab(oak)
+      -- PalletMovementScript_OakMoveLeft
+      -- (engine/overworld/auto_movement.asm) starts MUSIC_MUSEUM_GUY
+      -- when the escort begins in Yellow. Until then, Pallet Town plays
+      -- after the battle; Red/Blue leave MUSIC_MEET_PROF_OAK playing.
+      if yellow then
+        Music.play(game.data, "Music_MuseumGuy")
+      end
       local numSteps = x - 10
       if oak and numSteps > 0 then
         ow:scriptMove(oak, "left", numSteps, function()
@@ -249,14 +256,24 @@ M.PALLET_TOWN = {
         function()
           -- Oak turns toward the horizontally adjacent grass (left exit
           -- looks right, right exit looks left -- the
-          -- EVENT_PLAYER_AT_RIGHT_EXIT_TO_PALLET_TOWN branch)
+          -- EVENT_PLAYER_AT_RIGHT_EXIT_TO_PALLET_TOWN branch).
+          -- In pokeyellow, PalletTownOakGreetsPlayerScript turns Oak and
+          -- PalletTownPikachuBattleScript arms the battle on the next
+          -- overworld iteration. OverworldLoopLessDelay
+          -- (home/overworld.asm) burns two DelayFrame calls at the top
+          -- of each iteration and calls RunMapScript before checking
+          -- wCurOpponent, so those two DelayFrame calls are what keep
+          -- Oak's turn on screen before the battle check fires.
           if oak then oak.facing = x == 10 and "right" or "left" end
-          local battle = BattleState.newWild(game, "PIKACHU", 5)
-          battle:makeOldManDemo("PROF.OAK")
-          battle.onFinish = function()
-            afterPikaBattle()
-          end
-          game.stack:push(battle)
+          hold(2, nil, function()
+            local battle = BattleState.newWild(game, "PIKACHU", 5)
+            battle:makeOldManDemo("PROF.OAK")
+            battle.onFinish = function()
+              afterPikaBattle()
+            end
+            -- Use the standard wild-battle entry transition.
+            Commands.pushBattle(ctx, battle)
+          end)
         end))
     end
 
@@ -400,15 +417,24 @@ M.POKEMON_FAN_CLUB = {
     TEXT_POKEMONFANCLUB_CHAIRMAN = {
       { "face_player" },                                          -- 1
       { "check_flag", "EVENT_RECEIVED_BIKE_VOUCHER" },            -- 2
-      { "jump_if_true", 9 },                                      -- 3
-      { "show_text", "_PokemonFanClubChairmanIntroText" },        -- 4
-      { "show_text", "_PokemonFanClubChairmanStoryText" },        -- 5
+      { "jump_if_true", "nothing_left" },                         -- 3
+      -- YesNoChoice (scripts/PokemonFanClub.asm): NO forfeits the voucher (#1050)
+      { "ask", "_PokemonFanClubChairmanIntroText" },              -- 4
+      { "jump_if_false", "no_story" },                            -- 5
+      { "show_text", "_PokemonFanClubChairmanStoryText" },        -- 6
       -- give-then-print like scripts/PokemonFanClub.asm (GiveItem
       -- fills wStringBuffer; the received text reads it)
-      { "give_item", "BIKE_VOUCHER", 1, false },                  -- 6
-      { "show_text", "_PokemonFanClubReceivedBikeVoucherText" },  -- 7
-      { "set_flag", "EVENT_RECEIVED_BIKE_VOUCHER" },              -- 8
-      { "show_text", "_PokemonFanClubExplainBikeVoucherText" },   -- 9
+      { "give_item", "BIKE_VOUCHER", 1, false },                  -- 7
+      { "show_text", "_PokemonFanClubReceivedBikeVoucherText" },  -- 8
+      { "set_flag", "EVENT_RECEIVED_BIKE_VOUCHER" },              -- 9
+      { "show_text", "_PokemonFanClubExplainBikeVoucherText" },   -- 10
+      { "jump", "end" },                                          -- 11
+      { "label", "no_story" },                                    -- 12
+      { "show_text", "_PokemonFanClubNoStoryText" },              -- 13
+      { "jump", "end" },                                          -- 14
+      -- .nothingleft: the gift is done, he only reminisces now
+      { "label", "nothing_left" },                                -- 15
+      { "show_text", "_PokemonFanClubChairFinalText" },           -- 16
     },
   },
 }

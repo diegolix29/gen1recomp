@@ -21,12 +21,14 @@ local MoveEffects = require("src.battle.MoveEffects")
 local Party = require("src.pokemon.Party")
 local Pokemon = require("src.pokemon.Pokemon")
 local Runtime = require("src.mods.Runtime")
+local BattleSafety = require("src.battle.BattleSafety")
 local Screens = require("src.ui.Screens")
 local Status = require("src.battle.Status")
 local Timing = require("src.core.Timing")
 local TrainerAI = require("src.battle.TrainerAI")
 local TurnOrder = require("src.battle.TurnOrder")
 local TypeChart = require("src.battle.TypeChart")
+local UIVisibility = require("src.battle.UIVisibility")
 local RomText = require("src.core.RomText")
 local Strings = require("src.core.Strings")
 local WideBattle = require("src.battle.WideBattle")
@@ -36,6 +38,12 @@ local romText = RomText
 local BattleState = {}
 BattleState.__index = BattleState
 BattleState.isOpaque = true
+
+-- Category identity for per-category GAME SPEED (RFC 0007), the same
+-- style OverworldController.isOverworld already uses. Every battle --
+-- wild, trainer, link, safari, the old-man demo -- is this metatable, so
+-- Game.speedCategoryInStack needs no special-casing beyond this one flag.
+BattleState.isBattle = true
 
 function BattleState:romText(label, fallback, ...)
   return romText(self.data, label, fallback, ...)
@@ -125,6 +133,34 @@ end
 function BattleState:sgbPalettes()
   if self:wideLayout() then return WideBattle.zones() end
   return nil
+end
+
+function BattleState:bottomUIVisible()
+  return UIVisibility.bottomVisible(self, true)
+end
+
+function BattleState:statusHUDVisible()
+  if not Runtime.wantsHook("battle.status_hud_visible") then return true end
+  return Runtime.call("battle.status_hud_visible", function() return true end,
+                      self) ~= false
+end
+
+function BattleState:caughtMarkerVisible()
+  local dex = self.game and self.game.save and self.game.save.pokedex
+  if not self.enemy or (self.kind ~= "wild" and self.kind ~= "safari")
+      or not (dex and dex.owned and dex.owned[self.enemy.mon.species]) then
+    return false
+  end
+  if not Runtime.wantsHook("battle.caught_marker_visible") then return false end
+  return Runtime.call("battle.caught_marker_visible",
+                      function() return false end, self) == true
+end
+
+function BattleState:moveGridNavigation()
+  if self:wideLayout() then return true end
+  if not Runtime.wantsHook("battle.move_grid_navigation") then return false end
+  return Runtime.call("battle.move_grid_navigation", function() return false end,
+                      self) == true
 end
 
 local Rulesets = {
@@ -1846,9 +1882,18 @@ function BattleState:update(dt)
     -- its own has no slide to wait for.
     if (self.introSlide or 0) > 0 then return end
     if not self:updateQueue() then
-      if self.afterQueue == "menu" then
+      local destination = self.afterQueue
+      -- These fields are queue/presentation cursors, not durable battle
+      -- state. Once the queue has drained, keeping their terminal values
+      -- makes the real command menu look busy to BattleSafety even though
+      -- every message, wait and intro animation has settled.
+      self.afterQueue = nil
+      self.nextInsert = nil
+      self.waitFrames = nil
+      if destination == "menu" then
+        self.introSlide = nil
         self.phase = "menu"
-      elseif self.afterQueue == "finish" then
+      elseif destination == "finish" then
         self:finish()
       end
     end
@@ -1893,6 +1938,7 @@ function BattleState:update(dt)
     end
     self.menuIndex = row * 2 + col + 1
     if input:wasPressed("a") then
+      require("src.core.Sound").play(self.data, "Press_AB")
       self:safariAction(({ "ball", "bait", "rock", "run" })[self.menuIndex])
     end
     return
@@ -1916,6 +1962,17 @@ function BattleState:update(dt)
       self:resolveTurn(locked)
       return
     end
+    -- START has no vanilla action at a settled supported player-decision
+    -- boundary.  A tool mod may claim this semantic auxiliary action through
+    -- the public hook, receiving only game plus a data-only kind.  The shared
+    -- safety predicate keeps every unsupported/forced/animated phase inert.
+    if input:wasPressed("start") and Runtime.wantsHook("battle.menu_auxiliary") then
+      local safe = BattleSafety.inspect(self.game, self)
+      if safe and Runtime.call("battle.menu_auxiliary", function() return false end,
+          self.game, { kind = self.kind }) == true then
+        return
+      end
+    end
     local col = (self.menuIndex - 1) % 2
     local row = math.floor((self.menuIndex - 1) / 2)
     if input:wasPressed("left") then
@@ -1929,6 +1986,7 @@ function BattleState:update(dt)
     end
     self.menuIndex = row * 2 + col + 1
     if input:wasPressed("a") then
+      require("src.core.Sound").play(self.data, "Press_AB")
       local choice = ({ "fight", "pkmn", "item", "run" })[self.menuIndex]
       if choice == "fight" and self.ghost then
         self:say(Strings("%s is too\nscared to move!", self.player.name))
@@ -1974,7 +2032,7 @@ function BattleState:update(dt)
     -- The widescreen layout lays the four slots out as a 2x2 grid, so all
     -- four directions navigate it; nil means no direction was pressed and
     -- A / B / SELECT below behave the same in either layout.
-    local grid = self:wideLayout()
+    local grid = self:moveGridNavigation()
                  and WideBattle.navigate(self.moveIndex, #moves, input)
     if grid then
       self.moveIndex = grid
@@ -1990,9 +2048,11 @@ function BattleState:update(dt)
         self.moveSwapIndex = self.moveIndex
       end
     elseif input:wasPressed("b") then
+      require("src.core.Sound").play(self.data, "Press_AB")
       self.moveSwapIndex = nil
       self.phase = "menu"
     elseif input:wasPressed("a") then
+      require("src.core.Sound").play(self.data, "Press_AB")
       if self.moveSwapIndex then
         self:swapMoves(self.moveSwapIndex, self.moveIndex)
         self.moveSwapIndex = nil
@@ -2022,7 +2082,7 @@ function BattleState:update(dt)
     local moves = self.mimicMoves
     -- the copy menu shares the widescreen move grid, so it navigates the
     -- same way there (the classic layout keeps the vertical list)
-    local grid = self:wideLayout()
+    local grid = self:moveGridNavigation()
                  and WideBattle.navigate(self.mimicIndex, #moves, input)
     if grid then
       self.mimicIndex = grid
@@ -2031,6 +2091,7 @@ function BattleState:update(dt)
     elseif input:wasPressed("down") then
       self.mimicIndex = self.mimicIndex < #moves and self.mimicIndex + 1 or 1
     elseif input:wasPressed("a") then
+      require("src.core.Sound").play(self.data, "Press_AB")
       local pick = moves[self.mimicIndex]
       local ctx = self.mimicCtx
       self.mimicMoves, self.mimicCtx = nil, nil
@@ -2164,8 +2225,13 @@ function BattleState:openOldManBag()
   self.afterQueue = "menu"
   self:ui(function()
     local list
+    -- The canned bag (POKE_BALL, not read from the player's real
+    -- inventory) differs by version: pokered's OldManItemList has 50
+    -- POKé BALLs; pokeyellow's SimulatedInputBattleItemList, shared by
+    -- the Viridian tutorial and Oak's catch, has one.
+    local qty = require("src.core.GameVersion").isYellow() and "x1" or "x50"
     list = ListMenu.new(game, "ITEMS", {
-      { value = "POKE_BALL", label = Strings("POKé BALL"), right = "x50" },
+      { value = "POKE_BALL", label = Strings("POKé BALL"), right = qty },
     }, {
       script = function(l)
         l.scriptTimer = (l.scriptTimer or 0) + 1
@@ -4749,7 +4815,7 @@ end
 -- Party pokeball row (SetupPokeballs tiles: ball / status ball /
 -- fainted ball / empty), 6 slots stepping dx from (x,y).
 local ballQuads
-function BattleState:drawBallRow(party, x, y, dx)
+local function balls()
   if ballQuads == nil then
     local ok, img = pcall(love.graphics.newImage, "assets/generated/battle/balls.png")
     if ok then
@@ -4761,11 +4827,23 @@ function BattleState:drawBallRow(party, x, y, dx)
       ballQuads = false
     end
   end
-  if not ballQuads then return end
+  return ballQuads or nil
+end
+
+function BattleState:drawCaughtBall(x, y)
+  local quads = balls()
+  if not quads then return end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(quads.img, quads[0], x, y)
+end
+
+function BattleState:drawBallRow(party, x, y, dx)
+  local quads = balls()
+  if not quads then return end
   for i = 1, 6 do
     local mon = party[i]
     local tile = not mon and 3 or mon.hp <= 0 and 2 or mon.status and 1 or 0
-    love.graphics.draw(ballQuads.img, ballQuads[tile], x + (i - 1) * dx, y)
+    love.graphics.draw(quads.img, quads[tile], x + (i - 1) * dx, y)
   end
 end
 
@@ -5347,7 +5425,7 @@ function BattleState:drawPicsLayer(slide, sx, sy, onlySide, skipMenuClip)
   -- .mimicmenu) wipes rows 7+.  The port draws pics above the menu
   -- layer in the colorized pipeline, so clip them to the visible rows.
   local g = love.graphics
-  local clipY = not skipMenuClip
+  local clipY = not skipMenuClip and self:bottomUIVisible()
                 and (self.phase == "mimicSelect" and 56
                      or self.phase == "moveSelect" and 64)
                 or nil
@@ -5459,6 +5537,7 @@ function BattleState:drawHUDs(slide)
   -- per-pixel tint (grayFill) -- otherwise GREENBAR's red-channel-0 fill
   -- double-applies and the zone shade shader maps the whole bar to black (#229).
   local grayFill = self:colorMode()
+  local showStatus = self:statusHUDVisible()
   local barData = self.data
   local fx = self.fx
   local hudShake = (fx and fx.hudShakeX) or 0
@@ -5468,7 +5547,8 @@ function BattleState:drawHUDs(slide)
   -- DrawEnemyHUDAndHPBar is called from _InitBattleCommon (core.asm:6763)
   -- AFTER PrintBeginningBattleText returns, so "Wild X appeared!" shows the
   -- player's ball row with no enemy HUD beside it (#317)
-  if self.enemy and not self.showEnemyTrainer and not self.enemySendingOut
+  if showStatus and self.enemy and not self.showEnemyTrainer
+     and not self.enemySendingOut
      and not self:growInScale(self.enemy) and slide == 0
      and not self.introBalls and not self.enemy.fainted then
     -- enemy HUD (DrawEnemyHUDAndHPBar): name row 0, <LV>+level (4,1),
@@ -5479,7 +5559,12 @@ function BattleState:drawHUDs(slide)
       love.graphics.translate(hudShake, 0)
     end
     love.graphics.setColor(0, 0, 0, 1)
-    Font.draw(self.enemy.name, nameX(1, self.enemy.name), 0)
+    local enemyNameX = nameX(1, self.enemy.name)
+    local enemyNameWidth = Font.draw(self.enemy.name, enemyNameX, 0)
+    if self:caughtMarkerVisible() then
+      self:drawCaughtBall(enemyNameX + enemyNameWidth, 0)
+      love.graphics.setColor(0, 0, 0, 1)
+    end
     if self.enemy.shownStatus then
       Font.draw(self:statusLabel({ status = self.enemy.shownStatus }), 40, 8)
     else
@@ -5555,7 +5640,7 @@ function BattleState:drawHUDs(slide)
     self:drawBallRow(self.playerParty or self.game.save.party, 88, 80, 8)
   end
   local hidePlayer = self.safari or self.demo
-  if self.player and not hidePlayer and not self.showPlayerBack
+  if showStatus and self.player and not hidePlayer and not self.showPlayerBack
      and slide == 0 then
     -- player HUD (DrawPlayerHUDAndHPBar): name (10,7), <LV>+level
     -- (14,8), HP bar (10,9), HP numbers row 10, underline row 11 with
@@ -5580,6 +5665,7 @@ function BattleState:drawHUDs(slide)
 end
 
 function BattleState:drawTextArea()
+  if not self:bottomUIVisible() then return end
   Font.drawBox(0, 12, 20, 6)
   love.graphics.setColor(0, 0, 0, 1)
   if self.phase == "messages"
