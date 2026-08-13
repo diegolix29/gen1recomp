@@ -5,6 +5,7 @@ assets/generated/
 
 # LÖVE packages
 *.love
+bundlemods/OFF
 
 # Local saves (LÖVE writes to its save dir, but keep the repo clean anyway)
 save/
