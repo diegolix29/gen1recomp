@@ -71,3 +71,4 @@ mobile/ios/bundle_id.local
 /ports/uwp/third_party/*/source/
 /ports/uwp/third_party/angle/depot_tools/
 /bundlemods/DramaticShapeVoxelMod
+/native/tls_dial/obj
