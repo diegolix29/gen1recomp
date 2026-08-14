@@ -7,6 +7,7 @@
   "profile": "content",
   "category": "MECHANIC",
   "game_version": ">=0.0.0-0 <2.0.0",
+  "games": ["all"],
   "priority": 80,
   "dependencies": [],
   "optional_dependencies": [],

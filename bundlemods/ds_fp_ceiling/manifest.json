@@ -6,6 +6,7 @@
   "entry": "main.lua",
   "profile": "content",
   "game_version": ">=0.0.0-0 <2.0.0",
+  "games": ["all"],
   "category": "TOOL",
   "priority": 10,
   "permissions": [
