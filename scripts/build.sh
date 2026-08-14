@@ -36,6 +36,7 @@ NOTARY_PROFILE="notary-profile"
 NOTARIZE=true
 IOS_RELEASE=false
 IOS_IPA=false
+ICON_SRC="$ROOT/assets/logo/logo.png"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
@@ -70,7 +71,7 @@ rm -f "$LOVE_FILE"
 (cd "$ROOT" && zip -q -9 -r "$LOVE_FILE" \
   main.lua conf.lua src data assets tools/save-editor \
   tools/rom_manifest.json tools/rom_manifest_blue.json \
-  tools/rom_manifest_yellow.json tools/rom_manifest_gold.json \
+  tools/rom_manifest_yellow.json tools/rom_manifest_gold.json bundlemods\
   -x '*.DS_Store' 'data/generated/*' 'assets/generated/*')
 # Materialize the listing once and grep the file: piping unzip straight into
 # grep -q under `set -o pipefail` SIGPIPEs unzip when grep exits early on a
@@ -315,10 +316,20 @@ EOF
   # file-manager thumbnailers show for the file itself.
   [ -f "$ICON_SRC" ] || fail "missing icon source: $ICON_SRC"
   rm -f "$appdir/love.svg" "$appdir/love.png" "$appdir/.DirIcon"
-  sips -z 512 512 "$ICON_SRC" --out "$appdir/$APP_NAME.png" >/dev/null
+  if command -v sips >/dev/null 2>&1; then
+    sips -z 512 512 "$ICON_SRC" --out "$appdir/$APP_NAME.png" >/dev/null
+  elif command -v convert >/dev/null 2>&1; then
+    convert "$ICON_SRC" -resize 512x512 "$appdir/$APP_NAME.png" >/dev/null
+  else
+    cp "$ICON_SRC" "$appdir/$APP_NAME.png"
+  fi
   cp "$appdir/$APP_NAME.png" "$appdir/.DirIcon"
 
-  sed -i '' 's|^#FUSE_PATH="$APPDIR/my_game.love"$|FUSE_PATH="$APPDIR/game.love"|' "$appdir/AppRun"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' 's|^#FUSE_PATH="$APPDIR/my_game.love"$|FUSE_PATH="$APPDIR/game.love"|' "$appdir/AppRun"
+  else
+    sed -i 's|^#FUSE_PATH="$APPDIR/my_game.love"$|FUSE_PATH="$APPDIR/game.love"|' "$appdir/AppRun"
+  fi
   grep -q '^FUSE_PATH="\$APPDIR/game.love"$' "$appdir/AppRun" \
     || fail "failed to enable FUSE_PATH in AppRun (upstream AppRun changed?)"
 

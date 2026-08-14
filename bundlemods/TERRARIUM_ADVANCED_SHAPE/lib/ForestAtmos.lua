@@ -417,24 +417,24 @@ local RAY_SHADER = [[
   uniform Image depthTex;    // the frame's own depth, detached to read
   uniform Image sunMap;      // the sun's answer (see ShadowMap)
   uniform Image leafTex;     // the unseen foliage, tiling
-  uniform mat4 vp;
-  uniform mat4 sunVP;
-  uniform float sunBias;
-  uniform vec3 eye;
-  uniform vec3 curve;        // xy = the focus in world XZ, z = k; 0 = off
-  uniform vec2 screen;       // canvas size, for the pixel's own uv
-  uniform vec4 fogW;         // density, heightK, canopyY, fadeTo
-  uniform vec3 shear;        // the noon shear kx, kz; z = reach
-  uniform vec3 rayColor;
-  uniform float strength;
-  uniform vec3 sunward;      // unit, toward the unseen sun
-  uniform vec2 wind;         // leaf-field drift, uv per second
-  uniform float time;
+  uniform highp mat4 vp;
+  uniform highp mat4 sunVP;
+  uniform highp float sunBias;
+  uniform highp vec3 eye;
+  uniform highp vec3 curve;        // xy = the focus in world XZ, z = k; 0 = off
+  uniform highp vec2 screen;       // canvas size, for the pixel's own uv
+  uniform highp vec4 fogW;         // density, heightK, canopyY, fadeTo
+  uniform highp vec3 shear;        // the noon shear kx, kz; z = reach
+  uniform highp vec3 rayColor;
+  uniform highp float strength;
+  uniform highp vec3 sunward;      // unit, toward the unseen sun
+  uniform highp vec2 wind;         // leaf-field drift, uv per second
+  uniform highp float time;
   // the diorama's viewport, as the scene shader takes it (see Voxel3D):
   // air outside the model is not air, so a sample out there contributes
   // nothing and the beams end with the world they fall through
-  uniform vec3 cullAt;
-  uniform vec3 cullShape;
+  uniform highp vec3 cullAt;
+  uniform highp vec3 cullShape;
 
   float dioramaCull(vec3 p) {
     if (cullShape.z <= 0.5) return 1.0;
@@ -619,16 +619,16 @@ local PART_SHADER = [[
   varying vec2 vCorner;
   varying float vGlow;
 #ifdef VERTEX
-  uniform mat4 vp;
-  uniform vec3 curve;
-  uniform vec3 cullAt;     // the diorama's viewport (see Voxel3D.cull):
-  uniform vec3 cullShape;  // a mote outside the model is not in the air
-  uniform vec3 axisR;      // the camera's right, world space
-  uniform vec3 axisU;      // and its up: the billboard's own frame
-  uniform float time;
-  uniform float size;
-  uniform vec2 sway;       // wander amplitude: horizontal, vertical
-  uniform float blinky;    // 0 = steady motes, 1 = blinking fireflies
+  uniform highp mat4 vp;
+  uniform highp vec3 curve;
+  uniform highp vec3 cullAt;     // the diorama's viewport (see Voxel3D.cull):
+  uniform highp vec3 cullShape;  // a mote outside the model is not in the air
+  uniform highp vec3 axisR;      // the camera's right, world space
+  uniform highp vec3 axisU;      // and its up: the billboard's own frame
+  uniform highp float time;
+  uniform highp float size;
+  uniform highp vec2 sway;       // wander amplitude: horizontal, vertical
+  uniform highp float blinky;    // 0 = steady motes, 1 = blinking fireflies
   attribute vec4 AtmosData;    // corner x, corner y, phase, rate
   vec4 position(mat4 transform_projection, vec4 vertex_position) {
     float ph = AtmosData.z;
@@ -667,8 +667,8 @@ local PART_SHADER = [[
   }
 #endif
 #ifdef PIXEL
-  uniform vec3 dotColor;
-  uniform float level;
+  uniform highp vec3 dotColor;
+  uniform highp float level;
   vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     float d = dot(vCorner, vCorner);
     float glow = max(0.0, 1.0 - d);

@@ -84,6 +84,7 @@ jobs:
         env:
           CANONICAL_REPOSITORY: ${{ github.repository == 'bryanthaboi/gen1recomp' }}
         run: |
+          chmod +x scripts/build_ios.sh
           if [ "$CANONICAL_REPOSITORY" = true ]; then
             scripts/build_ios.sh --fetch --device --release
           else
@@ -136,9 +137,13 @@ jobs:
       - name: install luajit
         run: sudo apt-get update && sudo apt-get install -y luajit
       - name: Switch offline selftest
-        run: bash scripts/switch/selftest_build_switch.sh
+        run: |
+          chmod +x scripts/switch/selftest_build_switch.sh
+          bash scripts/switch/selftest_build_switch.sh
       - name: verify_payload self-test
-        run: bash scripts/switch/verify_payload.sh --self-test
+        run: |
+          chmod +x scripts/switch/verify_payload.sh
+          bash scripts/switch/verify_payload.sh --self-test
       - name: Switch CI workflow content gate
         run: luajit tests/switch_ci_workflows_test.lua
       - name: Switch transfer docs content gate
@@ -168,6 +173,7 @@ jobs:
       - name: Build Switch fused NRO
         run: |
           set -euo pipefail
+          chmod +x scripts/build_switch.sh
           VER="$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
           scripts/build_switch.sh --fetch --fused --version "$VER"
           echo "SWITCH_VER=$VER" >> "$GITHUB_ENV"
@@ -213,9 +219,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Xbox UWP offline selftest
-        run: bash scripts/xbox-uwp/selftest_build_xbox_uwp.sh
+        run: |
+          chmod +x scripts/xbox-uwp/selftest_build_xbox_uwp.sh
+          bash scripts/xbox-uwp/selftest_build_xbox_uwp.sh
       - name: Build shared payload
         run: |
+          chmod +x scripts/pack_love.sh
           scripts/pack_love.sh \
             --output .bazinga/work/ci-game.love \
             --listing .bazinga/work/ci-love-listing.txt \
@@ -246,6 +255,7 @@ jobs:
       - name: Build Xbox UWP package
         shell: bash
         run: |
+          chmod +x scripts/build_xbox_uwp.sh
           bash scripts/build_xbox_uwp.sh \
             --release \
             --version 0.0.0 \
@@ -296,7 +306,9 @@ jobs:
       # contract) is answerable without a container or an aarch64 machine,
       # so the slow native job below only ever starts on a sane tree.
       - name: Linux arm64 offline selftest
-        run: bash scripts/linux-arm64/selftest_build_linux_arm64.sh
+        run: |
+          chmod +x scripts/linux-arm64/selftest_build_linux_arm64.sh
+          bash scripts/linux-arm64/selftest_build_linux_arm64.sh
 
   linux-arm64-build:
     name: Linux arm64 AppImage build
@@ -314,6 +326,7 @@ jobs:
       - name: Build the aarch64 AppImage
         run: |
           set -euo pipefail
+          chmod +x scripts/build_linux_arm64.sh
           scripts/build_linux_arm64.sh --version 0.0.0
       - name: Verify the AppImage is self-contained and bullseye-compatible
         run: |

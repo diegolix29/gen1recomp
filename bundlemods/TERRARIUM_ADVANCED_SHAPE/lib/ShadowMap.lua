@@ -119,8 +119,8 @@ ShadowMap.slack = ShadowMap.BIAS
 local SHADER = [[
   varying float vDepth;
 #ifdef VERTEX
-  uniform mat4 lightVP;
-  uniform mat4 model;
+  uniform highp mat4 lightVP;
+  uniform highp mat4 model;
   vec4 position(mat4 transform_projection, vec4 vertex_position) {
     vec4 c = lightVP * (model * vertex_position);
     // the projection is orthographic, so w is 1 and clip z IS the depth,
@@ -130,7 +130,7 @@ local SHADER = [[
   }
 #endif
 #ifdef PIXEL
-  uniform float sprite;   // 1 while the CAST is being drawn; see ShadowMap.sprites
+  uniform highp float sprite;   // 1 while the CAST is being drawn; see ShadowMap.sprites
   vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     // the same alpha discard the main pass uses: a sprite card casts its
     // silhouette, not its 16x16 bounding box

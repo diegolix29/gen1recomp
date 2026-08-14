@@ -48,7 +48,7 @@ local blurA, blurB = nil, nil
 local frame = 0
 
 local SHADER = [[
-  uniform vec2 dir;
+  uniform highp vec2 dir;
   vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     vec4 sum = Texel(tex, tc) * 0.2270270270;
     sum += (Texel(tex, tc + dir) + Texel(tex, tc - dir)) * 0.1945945946;
