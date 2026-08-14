@@ -177,13 +177,14 @@ end
 local function newTableSink()
   local verts, indices, quads = {}, {}, 0
   return {
-    push = function(c, uv, shade, sky)
+    push = function(c, uv, shade, sky, water)
       local flat = type(shade) ~= "table"
       local s = faceSign(c, sky)
+      local w = water and 1.0 or 0.0
       for i = 1, 4 do
         local cc, t = c[i], uv[i]
         verts[#verts + 1] = { cc[1], cc[2], cc[3], t[1], t[2],
-                              s * (flat and shade or shade[i]) }
+                              s * (flat and shade or shade[i]), w }
       end
       Voxel3D.pushQuad(indices, quads)
       quads = quads + 1
@@ -217,22 +218,23 @@ local QUAD_IDX = { 0, 1, 2, 0, 2, 3 }
 
 local function newFfiSink(cap0)
   local capQuads = cap0 or 4096
-  local buf = ffi.new("float[?]", capQuads * 4 * 6)      -- 4 verts/quad
+  local buf = ffi.new("float[?]", capQuads * 4 * 7)      -- 4 verts/quad, 7 floats/vert (added water flag)
   local ibuf = ffi.new("uint32_t[?]", capQuads * 6)      -- 6 indices/quad
   local nQuads = 0
   local sink
   sink = {
-    push = function(c, uv, shade, sky)
+    push = function(c, uv, shade, sky, water)
       if nQuads + 1 > capQuads then
-        local grownV = ffi.new("float[?]", capQuads * 2 * 4 * 6)
-        ffi.copy(grownV, buf, nQuads * 4 * 6 * 4)
+        local grownV = ffi.new("float[?]", capQuads * 2 * 4 * 7)
+        ffi.copy(grownV, buf, nQuads * 4 * 7 * 4)
         local grownI = ffi.new("uint32_t[?]", capQuads * 2 * 6)
         ffi.copy(grownI, ibuf, nQuads * 6 * 4)
         buf, ibuf, capQuads = grownV, grownI, capQuads * 2
       end
       local flat = type(shade) ~= "table"
       local s = faceSign(c, sky)
-      local base = nQuads * 4 * 6
+      local w = water and 1.0 or 0.0
+      local base = nQuads * 4 * 7
       for i = 1, 4 do
         local cc, t = c[i], uv[i]
         buf[base] = cc[1]
@@ -241,7 +243,8 @@ local function newFfiSink(cap0)
         buf[base + 3] = t[1]
         buf[base + 4] = t[2]
         buf[base + 5] = s * (flat and shade or shade[i])
-        base = base + 6
+        buf[base + 6] = w
+        base = base + 7
       end
       local ibase, vbase = nQuads * 6, nQuads * 4
       for k = 1, 6 do
@@ -263,9 +266,9 @@ local function newFfiSink(cap0)
         local i = 0
         while i < n do
           local count = math.min(CHUNK, n - i)
-          local bytes = count * 6 * 4
+          local bytes = count * 7 * 4  -- 7 floats per vertex now
           local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
+          ffi.copy(data:getFFIPointer(), buf + i * 7, bytes)
           m:setVertices(data, i + 1)
           data:release()
           i = i + count
@@ -386,7 +389,7 @@ local function newChunkedSink()
   end
 
   return {
-    push = function(c, uv, shade, sky)
+    push = function(c, uv, shade, sky, water)
       local corner = c[1]
       local b = bucketFor(corner[1], corner[3])
       -- How TALL this cell gets, which is the other half of culling it.
@@ -458,6 +461,13 @@ local function runGeometry(map, bodyOnly, masks, sink)
     if run then return run.h end
     local s = S.shapeAt[k]
     return s and s.h or 0
+  end
+
+  local function isWaterAt(tx, ty)
+    local k = keyOf(tx, ty)
+    local s = S.shapeAt[k]
+    if not s then return false end
+    return s.class == "water"
   end
 
   -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
@@ -580,12 +590,12 @@ local function runGeometry(map, bodyOnly, masks, sink)
     return aoSide
   end
 
-  local function topQuad(x0, z0, h, tile, shade)
+  local function topQuad(x0, z0, h, tile, shade, water)
     local u0, u1, v0, v1 = uvRect(tile, 0, 8)
     push({ { x0, h, z0 }, { x0 + 8, h, z0 },
            { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
          { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
-         aoShades(x0 / 8, z0 / 8, h, shade))
+         aoShades(x0 / 8, z0 / 8, h, shade), water)
   end
 
   -- vertical quad for face direction `d` of the tile column at (x0, z0),
@@ -593,7 +603,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
   -- Corners run bottom-left, bottom-right, top-right, top-left as seen
   -- from outside; u follows +X on the north/south faces so a door or sign
   -- never draws mirrored.
-  local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade)
+  local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade, water)
     local x1, z1 = x0 + 8, z0 + 8
     local c
     if d == 5 then                                       -- south, at z1
@@ -606,7 +616,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
       c = { { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 } }
     end
     local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
-    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade)
+    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade, water)
   end
 
   local def = map.def
@@ -666,7 +676,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
         -- prebuilt prism quads (appended below) carry the art
         local g = S.ground[k]
         if g then
-          topQuad(tx * 8, ty * 8, 0, g, 1)
+          topQuad(tx * 8, ty * 8, 0, g, 1, false)
           -- the claimed tile is still ground at height 0, and water next
           -- door still recesses below it: without the same below-ground
           -- side bands ordinary ground emits, the two-pixel shoreline
@@ -688,7 +698,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
                   sideQuad(d, tx * 8, ty * 8, y0, y1, g,
                            (band * 8 + 8) - y1, (band * 8 + 8) - y0,
                            sideShades(hl, hr, y0, y1, y0 <= nh,
-                                      Voxel3D.FACE_SHADE[d]))
+                                      Voxel3D.FACE_SHADE[d]), false)
                 end
               end
             end
@@ -698,6 +708,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
         local run = S.runs[k]
         local h = run and run.h or s.h
         local x0, z0 = tx * 8, ty * 8
+        local isWater = isWaterAt(tx, ty)
 
         -- top face. A roofed volume gets a GABLE segment: the roof rises
         -- from the facade top at the south eave to a ridge across the
@@ -736,11 +747,11 @@ local function runGeometry(map, bodyOnly, masks, sink)
           local u0, u1, v0, v1 = uvRect(roofTile, 0, 8)
           push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
                  { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
-               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95)
+               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95, isWater)
         elseif run then
           local m = math.min(2, run.extent)
           local topTile = map:tileAt(tx, run.north + ((ty - run.north) % m))
-          topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE)
+          topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, isWater)
         else
           local topTile = tile
           if s.art == "upright" and s.authored then
@@ -781,7 +792,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
             topTile = S.tileAt[keyOf(tx, row)]
           end
           topQuad(x0, z0, h, topTile,
-                  s.art == "upright" and VOLUME_TOP_SHADE or 1)
+                  s.art == "upright" and VOLUME_TOP_SHADE or 1, isWater)
         end
 
         -- sides: 8px bands wherever the neighbour is lower. Band k spans
@@ -844,7 +855,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
                 end
                 sideQuad(d, x0, z0, y0, y1, src,
                          (band * 8 + 8) - y1, (band * 8 + 8) - y0,
-                         sideShades(hl, hr, y0, y1, y0 <= nh, shade))
+                         sideShades(hl, hr, y0, y1, y0 <= nh, shade), isWater)
               end
             end
           end
@@ -929,7 +940,11 @@ local function runGeometry(map, bodyOnly, masks, sink)
     -- the neighbour will ever draw that geometry
     if q.own or outwardOnEdge(q, x0, z0, x1, z1)
        or keepQuad(x0, z0, x1, z1) then
-      push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade))
+      -- Check if the quad is on water
+      local cellTx = math.floor((x0 + x1) / 16)
+      local cellTy = math.floor((z0 + z1) / 16)
+      local isWater = isWaterAt(cellTx, cellTy)
+      push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade), isWater)
     end
   end
 
@@ -972,6 +987,10 @@ local function runGeometry(map, bodyOnly, masks, sink)
       keepAll = interior or not maskedClosed(sx0, sz0, sx1, sz1)
       skipAll = not overBody and containedInMask(sx0, sz0, sx1, sz1)
     end
+    -- Check if the stamp cell is water
+    local cellTx = math.floor(mx / 8)
+    local cellTy = math.floor(mz / 8)
+    local isWater = isWaterAt(cellTx, cellTy)
     if not skipAll then
       for _, q in ipairs(st.quads) do
         Budget.tick()
@@ -994,7 +1013,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
           -- the crown the snow lands on. The corners cannot say -- a canopy's
           -- front is a flat plane standing for a curved one -- so this is the
           -- one quad in the mesher that overrides faceSign.
-          push(sc, quadUV(q), groundShades(sc, q.shade), q.sky)
+          push(sc, quadUV(q), groundShades(sc, q.shade), q.sky, isWater)
         end
       end
     end

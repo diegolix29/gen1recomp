@@ -126,7 +126,7 @@ function StadiumRig.new(model)
     for k = 1, prim.vertCount do
       -- position and shade are filled by skin(); the texture coordinates
       -- never change, so they are written once here
-      rows[k] = { 0, 0, 0, uv[k * 2 - 1], uv[k * 2], 1 }
+      rows[k] = { 0, 0, 0, uv[k * 2 - 1], uv[k * 2], 1, 0 }
     end
     local ok, mesh = pcall(love.graphics.newMesh, Voxel3D.FORMAT, rows,
                            "triangles", "dynamic")

@@ -71,8 +71,8 @@ local function buildCard(def, frame)
   
   -- Create quad vertices with world dimensions (scaled physical size)
   local verts = {
-    { 0, 0, 0, u0, v1, 1 }, { worldWidth, 0, 0, u1, v1, 1 },
-    { worldWidth, worldHeight, 0, u1, v0, 1 }, { 0, worldHeight, 0, u0, v0, 1 },
+    { 0, 0, 0, u0, v1, 1, 0 }, { worldWidth, 0, 0, u1, v1, 1, 0 },
+    { worldWidth, worldHeight, 0, u1, v0, 1, 0 }, { 0, worldHeight, 0, u0, v0, 1, 0 },
   }
   local indices = {}
   Voxel3D.pushQuad(indices, 0)

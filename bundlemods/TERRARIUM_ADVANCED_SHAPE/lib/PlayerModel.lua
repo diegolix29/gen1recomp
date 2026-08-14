@@ -125,7 +125,7 @@ local function objToMesh(vertices, texCoords, faces)
   end
   
   -- Build vertex buffer in Voxel3D.FORMAT
-  -- Format: { "VertexPosition", "float", 3 }, { "VertexTexCoord", "float", 2 }, { "VertexShade", "float", 1 }
+  -- Format: { "VertexPosition", "float", 3 }, { "VertexTexCoord", "float", 2 }, { "VertexShade", "float", 1 }, { "VertexWater", "float", 1 }
   -- LÖVE expects table of tables, where each vertex is its own table
   local vertexData = {}
   
@@ -139,14 +139,15 @@ local function objToMesh(vertices, texCoords, faces)
       local tc = texCoordIndex and texCoords[texCoordIndex]
       
       if v then
-        -- Create a vertex table with 6 values: x, y, z, u, v, shade
+        -- Create a vertex table with 7 values: x, y, z, u, v, shade, water
         local vertex = {
           v[1],           -- x
           v[2],          -- y (flipped to match coordinate system)
           v[3],          -- z (flipped to face the right direction)
           tc and tc[1] or 0,  -- u (texture coordinate)
           tc and tc[2] or 0,  -- v (texture coordinate, flipped for LOVE)
-          1.0             -- shade
+          1.0,           -- shade
+          0.0            -- water flag (0 for player models)
         }
         table.insert(vertexData, vertex)
       else
